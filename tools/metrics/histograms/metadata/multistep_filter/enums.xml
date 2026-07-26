@@ -1,0 +1,87 @@
+<!--
+Copyright 2026 The Chromium Authors
+Use of this source code is governed by a BSD-style license that can be
+found in the LICENSE file.
+-->
+
+<histogram-configuration>
+
+<!-- Enum types -->
+
+<enums>
+
+<!-- LINT.IfChange(MultistepFilterApplicationOutcome) -->
+
+<enum name="MultistepFilterApplicationOutcome">
+  <int value="0" label="AllFiltersApplied">
+    All filters were successfully applied and verified.
+  </int>
+  <int value="1" label="NotAllFiltersApplied">
+    Technical failure to apply the filters (e.g. extraction failed or landing
+    page was an error page).
+  </int>
+  <int value="2" label="AbandonedBeforeVerification">
+    The user navigated away, closed the tab, or accepted a new suggestion before
+    the application could be verified.
+  </int>
+</enum>
+
+<!-- LINT.ThenChange(//components/multistep_filter/core/logging/multistep_filter_metrics.h:MultistepFilterApplicationOutcome) -->
+
+<!-- LINT.IfChange(MultistepFilterPostSuggestionApplicationUserEngagement) -->
+
+<enum name="MultistepFilterPostSuggestionApplicationUserEngagement">
+  <int value="0" label="kEngagedWithFurtherNavigationWithinSessionWindow">
+    Engaged with further on-page navigation within session window
+  </int>
+  <int value="1" label="kEngagedWithFurtherNavigationAfterSessionWindow">
+    Engaged with further on-page navigation after session window
+  </int>
+  <int value="2" label="kAbandonedWithinSessionWindowTabClosed">
+    Abandoned within session window by tab closure
+  </int>
+  <int value="3" label="kAbandonedAfterSessionWindowTabClosed">
+    Abandoned after session window by tab closure
+  </int>
+  <int value="4" label="kAbandonedWithinSessionWindowOmniboxOrBookmark">
+    Abandoned within session window by navigating via omnibox/bookmark
+  </int>
+  <int value="5" label="kAbandonedAfterSessionWindowOmniboxOrBookmark">
+    Abandoned after session window by navigating via omnibox/bookmark
+  </int>
+  <int value="6" label="kAbandonedWithinSessionWindowBackNavigation">
+    Abandoned within session window by navigating back
+  </int>
+  <int value="7" label="kAbandonedAfterSessionWindowBackNavigation">
+    Abandoned after session window by navigating back
+  </int>
+  <int value="8" label="kAbandonedWithinSessionWindowSessionOverride">
+    Abandoned within session window by a new suggestion application overriding
+    the active session
+  </int>
+  <int value="9" label="kAbandonedAfterSessionWindowSessionOverride">
+    Abandoned after session window by a new suggestion application overriding
+    the active session
+  </int>
+</enum>
+
+<!-- LINT.ThenChange(//components/multistep_filter/core/logging/multistep_filter_metrics.h:MultistepFilterPostSuggestionApplicationUserEngagement) -->
+
+<!-- LINT.IfChange(SuggestionUserDecision) -->
+
+<enum name="SuggestionUserDecision">
+  <int value="0" label="Accepted">Multistep Filter suggestion was accepted</int>
+  <int value="1" label="Ignored">
+    Multistep Filter suggestion was ignored (e.g. collapsed or not clicked)
+  </int>
+  <int value="2" label="Dismissed">
+    Multistep Filter suggestion was dismissed
+  </int>
+  <int value="3" label="SettingsOpened">Multistep Filter settings opened</int>
+</enum>
+
+<!-- LINT.ThenChange(//components/multistep_filter/core/data_models/suggestion_user_decision.h:SuggestionUserDecision) -->
+
+</enums>
+
+</histogram-configuration>

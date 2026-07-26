@@ -1,0 +1,125 @@
+// Copyright 2023 The Chromium Authors
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+
+package org.chromium.base;
+
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertTrue;
+
+import android.content.Context;
+
+import androidx.test.core.app.ApplicationProvider;
+
+import org.junit.Test;
+import org.junit.runner.RunWith;
+
+import org.chromium.base.test.BaseRobolectricTestRunner;
+
+import java.io.File;
+
+/** junit tests for {@link PathUtils}. */
+@RunWith(BaseRobolectricTestRunner.class)
+public class PathUtilsTest {
+    static final String THUMBNAIL_DIRECTORY_NAME = "textures";
+
+    @Test
+    public void testSetPrivateDataDirectorySuffix() {
+        Context context = ApplicationProvider.getApplicationContext();
+        String dataSuffix = "data_suffix";
+        String cacheSubDir = "cache_subdir";
+        String expectedDataDir = context.getDir(dataSuffix, Context.MODE_PRIVATE).getPath();
+        String expectedThumbnailDir =
+                context.getDir(THUMBNAIL_DIRECTORY_NAME, Context.MODE_PRIVATE).getPath();
+        String expectedCacheDir = new File(context.getCacheDir(), cacheSubDir).getPath();
+
+        PathUtils.setPrivateDataDirectorySuffix(dataSuffix, cacheSubDir);
+        String dataDir = PathUtils.getDataDirectory();
+        String cacheDir = PathUtils.getCacheDirectory();
+        String thumbnailDir = PathUtils.getThumbnailCacheDirectory();
+
+        assertEquals(expectedDataDir, dataDir);
+        assertEquals(expectedCacheDir, cacheDir);
+        assertEquals(expectedThumbnailDir, thumbnailDir);
+    }
+
+    @Test
+    public void testIsPathCanonical() {
+        assertTrue(PathUtils.isPathCanonical("/"));
+        assertTrue(PathUtils.isPathCanonical("/foo"));
+        assertTrue(PathUtils.isPathCanonical("/foo/bar"));
+        assertTrue(PathUtils.isPathCanonical("/foo/.../bar"));
+
+        assertFalse(PathUtils.isPathCanonical(null));
+        assertFalse(PathUtils.isPathCanonical(""));
+        assertFalse(PathUtils.isPathCanonical("foo"));
+        assertFalse(PathUtils.isPathCanonical("foo/bar"));
+        assertFalse(PathUtils.isPathCanonical("./foo"));
+        assertFalse(PathUtils.isPathCanonical("../foo"));
+        assertFalse(PathUtils.isPathCanonical("//"));
+        assertFalse(PathUtils.isPathCanonical("/."));
+        assertFalse(PathUtils.isPathCanonical("/.."));
+        assertFalse(PathUtils.isPathCanonical("/foo//bar"));
+        assertFalse(PathUtils.isPathCanonical("/foo/./bar"));
+        assertFalse(PathUtils.isPathCanonical("/foo/../bar"));
+        assertFalse(PathUtils.isPathCanonical("/foo/bar/"));
+        assertFalse(PathUtils.isPathCanonical("/foo/bar/."));
+        assertFalse(PathUtils.isPathCanonical("/foo/bar/.."));
+        assertFalse(PathUtils.isPathCanonical("/foo/b\0r"));
+        assertFalse(PathUtils.isPathCanonical("/foo/bar\0"));
+    }
+
+    @Test
+    public void testIsPathUnderAppDir() {
+        Context context = ApplicationProvider.getApplicationContext();
+        File dataDir = context.getDataDir();
+        File externalDir = ContextUtils.getApplicationContext().getExternalFilesDir(null);
+
+        assertFalse(PathUtils.isPathUnderAppDir("/data_path/a/b/c", context));
+        assertTrue(PathUtils.isPathUnderAppDir(dataDir.toString(), context));
+        assertTrue(PathUtils.isPathUnderAppDir(externalDir.toString(), context));
+        assertTrue(PathUtils.isPathUnderAppDir(new File(dataDir, "child").toString(), context));
+        assertTrue(PathUtils.isPathUnderAppDir(new File(dataDir, "bad\u0000").toString(), context));
+    }
+
+    @Test
+    public void testSetPrivateDirectoryPath() {
+        String dataPath = "/data_path/a/b/c";
+        String cachePath = "/cache_path/a/b/c";
+        String dataSuffix = "data_suffix";
+        String cacheSubDir = "cache_subdir";
+        String expectedDataDir = dataPath + "/" + dataSuffix;
+        String expectedCacheDir = cachePath + "/" + cacheSubDir;
+        String expectedThumbnailDir = dataPath + "/" + THUMBNAIL_DIRECTORY_NAME;
+
+        PathUtils.setPrivateDirectoryPath(dataPath, cachePath, dataSuffix, cacheSubDir);
+        String dataDir = PathUtils.getDataDirectory();
+        String cacheDir = PathUtils.getCacheDirectory();
+        String thumbnailDir = PathUtils.getThumbnailCacheDirectory();
+
+        assertEquals(expectedDataDir, dataDir);
+        assertEquals(expectedCacheDir, cacheDir);
+        assertEquals(expectedThumbnailDir, thumbnailDir);
+    }
+
+    @Test
+    public void testSetPrivateDirectoryPathWithoutBasePaths() {
+        Context context = ApplicationProvider.getApplicationContext();
+        String dataSuffix = "data_suffix";
+        String cacheSubDir = "cache_subdir";
+        String expectedDataDir = context.getDir(dataSuffix, Context.MODE_PRIVATE).getPath();
+        String expectedThumbnailDir =
+                context.getDir(THUMBNAIL_DIRECTORY_NAME, Context.MODE_PRIVATE).getPath();
+        String expectedCacheDir = new File(context.getCacheDir(), cacheSubDir).getPath();
+
+        PathUtils.setPrivateDirectoryPath(null, null, dataSuffix, cacheSubDir);
+        String dataDir = PathUtils.getDataDirectory();
+        String cacheDir = PathUtils.getCacheDirectory();
+        String thumbnailDir = PathUtils.getThumbnailCacheDirectory();
+
+        assertEquals(expectedDataDir, dataDir);
+        assertEquals(expectedCacheDir, cacheDir);
+        assertEquals(expectedThumbnailDir, thumbnailDir);
+    }
+}

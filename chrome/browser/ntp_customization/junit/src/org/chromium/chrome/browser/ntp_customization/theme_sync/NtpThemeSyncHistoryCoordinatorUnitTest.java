@@ -1,0 +1,543 @@
+// Copyright 2026 The Chromium Authors
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+
+package org.chromium.chrome.browser.ntp_customization.theme_sync;
+
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.clearInvocations;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
+
+import android.content.Context;
+import android.graphics.Color;
+import android.view.ContextThemeWrapper;
+import android.view.LayoutInflater;
+import android.view.View;
+import android.view.ViewGroup;
+
+import androidx.recyclerview.widget.RecyclerView;
+import androidx.test.core.app.ApplicationProvider;
+
+import org.junit.After;
+import org.junit.Before;
+import org.junit.Rule;
+import org.junit.Test;
+import org.junit.runner.RunWith;
+import org.mockito.Mock;
+import org.mockito.junit.MockitoJUnit;
+import org.mockito.junit.MockitoRule;
+import org.robolectric.annotation.Config;
+
+import org.chromium.base.test.BaseRobolectricTestRunner;
+import org.chromium.base.test.util.Features;
+import org.chromium.chrome.browser.flags.ChromeFeatureList;
+import org.chromium.chrome.browser.ntp_customization.BottomSheetDelegate;
+import org.chromium.chrome.browser.ntp_customization.NtpCustomizationConfigManager;
+import org.chromium.chrome.browser.ntp_customization.R;
+import org.chromium.chrome.browser.ntp_customization.theme.chrome_colors.NtpThemeColorInfo.NtpThemeColorId;
+import org.chromium.chrome.browser.ntp_customization.theme_sync.data.NtpBackgroundDataBase;
+import org.chromium.chrome.browser.ntp_customization.theme_sync.data.NtpBackgroundDataColor;
+import org.chromium.chrome.browser.ntp_customization.theme_sync.data.NtpBackgroundDataCustomizedColor;
+import org.chromium.chrome.browser.ntp_customization.theme_sync.data.NtpBackgroundDataManager;
+import org.chromium.chrome.browser.ntp_customization.theme_sync.data.PlatformType;
+import org.chromium.ui.modelutil.PropertyModel;
+
+import java.util.List;
+
+/** Unit tests for {@link NtpThemeSyncHistoryCoordinator}. */
+@RunWith(BaseRobolectricTestRunner.class)
+@Config(manifest = Config.NONE)
+@Features.EnableFeatures({
+    ChromeFeatureList.NEW_TAB_PAGE_CUSTOMIZATION_V2,
+    ChromeFeatureList.NEW_TAB_PAGE_CUSTOMIZATION_THEME_SYNC
+})
+public class NtpThemeSyncHistoryCoordinatorUnitTest {
+    @Rule public MockitoRule mMockitoRule = MockitoJUnit.rule();
+
+    @Mock private BottomSheetDelegate mBottomSheetDelegate;
+    @Mock private View.OnClickListener mMoreOptionsClickListener;
+    @Mock private NtpCustomizationConfigManager mNtpCustomizationConfigManager;
+
+    private Context mContext;
+    private NtpThemeSyncHistoryCoordinator mCoordinator;
+    private NtpBackgroundDataManager mNtpBackgroundDataManager;
+    private ViewGroup mParentView;
+    private PropertyModel mPropertyModel;
+
+    @Before
+    public void setUp() {
+        mContext =
+                new ContextThemeWrapper(
+                        ApplicationProvider.getApplicationContext(),
+                        R.style.Theme_BrowserUI_DayNight);
+
+        NtpCustomizationConfigManager.setInstanceForTesting(mNtpCustomizationConfigManager);
+
+        mNtpBackgroundDataManager = new NtpBackgroundDataManager(mContext);
+        mNtpBackgroundDataManager.resetSharedPreferenceForTesting();
+
+        mParentView =
+                (ViewGroup)
+                        LayoutInflater.from(mContext)
+                                .inflate(R.layout.ntp_customization_main_bottom_sheet, null);
+
+        mCoordinator =
+                new NtpThemeSyncHistoryCoordinator(
+                        mContext, mParentView, mBottomSheetDelegate, mMoreOptionsClickListener);
+        mPropertyModel = mCoordinator.getPropertyModelForTesting();
+    }
+
+    @After
+    public void tearDown() {
+        mNtpBackgroundDataManager.resetSharedPreferenceForTesting();
+        NtpCustomizationConfigManager.getInstance().resetForTesting();
+        if (mCoordinator != null) {
+            mCoordinator.destroy();
+        }
+    }
+
+    @Test
+    public void testConstructor() {
+        assertTrue(mPropertyModel.get(NtpThemeSyncHistoryProperties.IS_VISIBLE));
+        assertNotNull(
+                mPropertyModel.get(NtpThemeSyncHistoryProperties.RECYCLER_VIEW_LAYOUT_MANAGER));
+        assertEquals(
+                mMoreOptionsClickListener,
+                mPropertyModel.get(NtpThemeSyncHistoryProperties.MORE_OPTIONS_CLICK_LISTENER));
+    }
+
+    @Test
+    public void testDestroy() {
+        mCoordinator.destroy();
+        assertNull(mPropertyModel.get(NtpThemeSyncHistoryProperties.MORE_OPTIONS_CLICK_LISTENER));
+        assertNull(mPropertyModel.get(NtpThemeSyncHistoryProperties.RECYCLER_VIEW_LAYOUT_MANAGER));
+    }
+
+    @Test
+    public void testPrepareToShow_NoHistory() {
+        mCoordinator.prepareToShow();
+
+        List<NtpBackgroundDataBase> dataList = mCoordinator.getDataShowingListForTesting();
+        assertEquals(3, dataList.size());
+        // First three items should be default data options.
+        assertTrue(dataList.get(0) instanceof NtpBackgroundDataColor);
+        assertEquals(
+                NtpThemeColorId.DEFAULT,
+                ((NtpBackgroundDataColor) dataList.get(0)).getThemeColorId());
+        assertEquals(
+                NtpThemeColorId.NTP_COLORS_ORANGE,
+                ((NtpBackgroundDataColor) dataList.get(1)).getThemeColorId());
+        assertEquals(
+                NtpThemeColorId.NTP_COLORS_VIOLET,
+                ((NtpBackgroundDataColor) dataList.get(2)).getThemeColorId());
+
+        assertEquals(
+                0, (int) mPropertyModel.get(NtpThemeSyncHistoryProperties.HIGHLIGHTED_ITEM_INDEX));
+        assertNotNull(mPropertyModel.get(NtpThemeSyncHistoryProperties.RECYCLER_VIEW_ADAPTER));
+    }
+
+    @Test
+    public void testPrepareToShow_WithLocalHistory() {
+        // Save some local history.
+        NtpBackgroundDataColor localColor =
+                new NtpBackgroundDataColor(
+                        mContext,
+                        PlatformType.ANDROID,
+                        NtpThemeColorId.NTP_COLORS_BLUE,
+                        /* isChromeColorDailyRefreshEnabled= */ false);
+        mNtpBackgroundDataManager.saveUserSelectedBackgroundTypeToSharedPreference(localColor);
+
+        when(mNtpCustomizationConfigManager.getNtpBackgroundData()).thenReturn(localColor);
+
+        mCoordinator.prepareToShow();
+
+        List<NtpBackgroundDataBase> dataList = mCoordinator.getDataShowingListForTesting();
+        assertEquals(4, dataList.size());
+        // First three items are default options, fourth is local history
+        assertEquals(
+                NtpThemeColorId.DEFAULT,
+                ((NtpBackgroundDataColor) dataList.get(0)).getThemeColorId());
+        assertEquals(
+                NtpThemeColorId.NTP_COLORS_ORANGE,
+                ((NtpBackgroundDataColor) dataList.get(1)).getThemeColorId());
+        assertEquals(
+                NtpThemeColorId.NTP_COLORS_VIOLET,
+                ((NtpBackgroundDataColor) dataList.get(2)).getThemeColorId());
+        assertEquals(
+                NtpThemeColorId.NTP_COLORS_BLUE,
+                ((NtpBackgroundDataColor) dataList.get(3)).getThemeColorId());
+
+        // Highlighted index should be 3 (the local history item)
+        assertEquals(
+                3, (int) mPropertyModel.get(NtpThemeSyncHistoryProperties.HIGHLIGHTED_ITEM_INDEX));
+    }
+
+    @Test
+    public void testPrepareToShow_WithLocalHistory_DefaultTheme() {
+        // Save some local history.
+        NtpBackgroundDataColor localColor =
+                new NtpBackgroundDataColor(
+                        mContext,
+                        PlatformType.ANDROID,
+                        NtpThemeColorId.NTP_COLORS_BLUE,
+                        /* isChromeColorDailyRefreshEnabled= */ false);
+        mNtpBackgroundDataManager.saveUserSelectedBackgroundTypeToSharedPreference(localColor);
+
+        // Current theme is default.
+        when(mNtpCustomizationConfigManager.getNtpBackgroundData()).thenReturn(null);
+
+        mCoordinator.prepareToShow();
+
+        List<NtpBackgroundDataBase> dataList = mCoordinator.getDataShowingListForTesting();
+        assertEquals(4, dataList.size());
+
+        // Highlighted index should be 0 (the default item)
+        assertEquals(
+                0, (int) mPropertyModel.get(NtpThemeSyncHistoryProperties.HIGHLIGHTED_ITEM_INDEX));
+    }
+
+    @Test
+    public void testPrepareToShow_WithLocalHistory_NonDefaultTheme() {
+        // Save some local history.
+        NtpBackgroundDataColor localColor =
+                new NtpBackgroundDataColor(
+                        mContext,
+                        PlatformType.ANDROID,
+                        NtpThemeColorId.NTP_COLORS_BLUE,
+                        /* isChromeColorDailyRefreshEnabled= */ false);
+
+        // Current theme is default.
+        when(mNtpCustomizationConfigManager.getNtpBackgroundData()).thenReturn(localColor);
+
+        mCoordinator.prepareToShow();
+
+        List<NtpBackgroundDataBase> dataList = mCoordinator.getDataShowingListForTesting();
+        assertEquals(3, dataList.size());
+
+        // Highlighted index should be NO_POSITION since localColor is not in local history
+        assertEquals(
+                RecyclerView.NO_POSITION,
+                (int) mPropertyModel.get(NtpThemeSyncHistoryProperties.HIGHLIGHTED_ITEM_INDEX));
+    }
+
+    @Test
+    public void testPrepareToShow_WithLocalAndRemoteHistory() {
+        // Save local history.
+        NtpBackgroundDataCustomizedColor localColor =
+                new NtpBackgroundDataCustomizedColor(
+                        mContext,
+                        PlatformType.ANDROID,
+                        /* primaryColorLight= */ Color.BLUE,
+                        /* primaryColorDark= */ Color.BLUE,
+                        /* ntpBackgroundColorLight= */ Color.WHITE,
+                        /* ntpBackgroundColorDark= */ Color.BLACK);
+
+        mNtpBackgroundDataManager.saveUserSelectedBackgroundTypeToSharedPreference(localColor);
+
+        // Save remote history (different from local).
+        NtpBackgroundDataCustomizedColor remoteColor =
+                new NtpBackgroundDataCustomizedColor(
+                        mContext,
+                        PlatformType.IOS,
+                        /* primaryColorLight= */ Color.CYAN,
+                        /* primaryColorDark= */ Color.CYAN,
+                        /* ntpBackgroundColorLight= */ Color.WHITE,
+                        /* ntpBackgroundColorDark= */ Color.BLACK);
+        mNtpBackgroundDataManager.saveRemoteSyncDataToSharedPreference(remoteColor);
+
+        // Save another remote history which is duplicate of local.
+        NtpBackgroundDataCustomizedColor remoteDuplicateColor =
+                new NtpBackgroundDataCustomizedColor(
+                        mContext,
+                        PlatformType.IOS,
+                        /* primaryColorLight= */ Color.BLUE,
+                        /* primaryColorDark= */ Color.BLUE,
+                        /* ntpBackgroundColorLight= */ Color.WHITE,
+                        /* ntpBackgroundColorDark= */ Color.BLACK);
+        mNtpBackgroundDataManager.saveRemoteSyncDataToSharedPreference(remoteDuplicateColor);
+
+        when(mNtpCustomizationConfigManager.getNtpBackgroundData()).thenReturn(localColor);
+
+        mCoordinator.prepareToShow();
+
+        List<NtpBackgroundDataBase> dataList = mCoordinator.getDataShowingListForTesting();
+        // Should contain: Default, Orange, Violet, Local history (blue), Remote history (blue).
+        assertEquals(5, dataList.size());
+        assertEquals(
+                NtpThemeColorId.DEFAULT,
+                ((NtpBackgroundDataColor) dataList.get(0)).getThemeColorId());
+        assertEquals(
+                NtpThemeColorId.NTP_COLORS_ORANGE,
+                ((NtpBackgroundDataColor) dataList.get(1)).getThemeColorId());
+        assertEquals(
+                NtpThemeColorId.NTP_COLORS_VIOLET,
+                ((NtpBackgroundDataColor) dataList.get(2)).getThemeColorId());
+        assertEquals(localColor, dataList.get(3));
+        assertEquals(remoteDuplicateColor, dataList.get(4));
+
+        // Highlighted index should be 3 (local history)
+        assertEquals(
+                3, (int) mPropertyModel.get(NtpThemeSyncHistoryProperties.HIGHLIGHTED_ITEM_INDEX));
+    }
+
+    @Test
+    public void testOnItemClicked() {
+        // Setup data: Default and one remote history (no local history)
+        NtpBackgroundDataCustomizedColor remoteColor =
+                new NtpBackgroundDataCustomizedColor(
+                        mContext,
+                        PlatformType.IOS,
+                        /* primaryColorLight= */ Color.BLUE,
+                        /* primaryColorDark= */ Color.BLUE,
+                        /* ntpBackgroundColorLight= */ Color.WHITE,
+                        /* ntpBackgroundColorDark= */ Color.BLACK);
+        mNtpBackgroundDataManager.saveRemoteSyncDataToSharedPreference(remoteColor);
+
+        mCoordinator.prepareToShow();
+
+        NtpThemeSyncHistoryRecyclerViewAdaptor adapter =
+                mCoordinator.getRecyclerViewAdaptorForTesting();
+        assertNotNull(adapter);
+
+        int position = 3;
+        // Click the remote history item (index 3, after Default, Orange, and Violet)
+        adapter.setSelectedPosition(position, /* isFromClick= */ true);
+
+        // Verify config manager is notified.
+        verify(mNtpCustomizationConfigManager)
+                .onBackgroundDataChanged(eq(mContext), eq(remoteColor));
+        // Verify delegate is notified (it is a different color from default, so true)
+        verify(mBottomSheetDelegate).onNewColorSelected(eq(true));
+
+        // Click it again, should not trigger changes since it's already selected.
+        clearInvocations(mNtpCustomizationConfigManager);
+        adapter.setSelectedPosition(position, /* isFromClick= */ true);
+
+        // Verify delegate isn't notified.
+        verify(mNtpCustomizationConfigManager, never()).onBackgroundDataChanged(any(), any());
+    }
+
+    @Test
+    public void testOnItemClicked_SelectOriginalItem() {
+        // Setup data: Default and one local history.
+        NtpBackgroundDataColor localColor =
+                new NtpBackgroundDataColor(
+                        mContext,
+                        PlatformType.ANDROID,
+                        NtpThemeColorId.NTP_COLORS_BLUE,
+                        /* isChromeColorDailyRefreshEnabled= */ false);
+        mNtpBackgroundDataManager.saveUserSelectedBackgroundTypeToSharedPreference(localColor);
+        when(mNtpCustomizationConfigManager.getNtpBackgroundData()).thenReturn(localColor);
+
+        mCoordinator.prepareToShow();
+
+        NtpThemeSyncHistoryRecyclerViewAdaptor adapter =
+                mCoordinator.getRecyclerViewAdaptorForTesting();
+        assertNotNull(adapter);
+
+        // Click the Default item (index 0), which is different from the original selected item
+        // (index 3).
+        int position = 0;
+        adapter.setSelectedPosition(position, /* isFromClick= */ true);
+
+        verify(mNtpCustomizationConfigManager).onBackgroundDataChanged(eq(mContext), any());
+        verify(mBottomSheetDelegate).onNewColorSelected(eq(true));
+
+        clearInvocations(mNtpCustomizationConfigManager, mBottomSheetDelegate);
+
+        // Click back to the original selected item (index 3).
+        position = 3;
+        adapter.setSelectedPosition(position, /* isFromClick= */ true);
+
+        verify(mNtpCustomizationConfigManager)
+                .onBackgroundDataChanged(eq(mContext), eq(localColor));
+        verify(mBottomSheetDelegate).onNewColorSelected(eq(false));
+    }
+
+    @Test
+    public void testPrepareToShow_SubsequentCallUpdatesOnlyLocalHistory() {
+        // 1. Initial Setup: one local (BLUE), one remote (CYAN).
+        NtpBackgroundDataColor localColor1 =
+                new NtpBackgroundDataColor(
+                        mContext,
+                        PlatformType.ANDROID,
+                        NtpThemeColorId.NTP_COLORS_BLUE,
+                        /* isChromeColorDailyRefreshEnabled= */ false);
+        mNtpBackgroundDataManager.saveUserSelectedBackgroundTypeToSharedPreference(localColor1);
+
+        NtpBackgroundDataCustomizedColor remoteColor1 =
+                new NtpBackgroundDataCustomizedColor(
+                        mContext,
+                        PlatformType.IOS,
+                        /* primaryColorLight= */ Color.CYAN,
+                        /* primaryColorDark= */ Color.CYAN,
+                        /* ntpBackgroundColorLight= */ Color.WHITE,
+                        /* ntpBackgroundColorDark= */ Color.BLACK);
+        mNtpBackgroundDataManager.saveRemoteSyncDataToSharedPreference(remoteColor1);
+
+        when(mNtpCustomizationConfigManager.getNtpBackgroundData()).thenReturn(localColor1);
+
+        // Call first time
+        mCoordinator.prepareToShow();
+
+        List<NtpBackgroundDataBase> dataList = mCoordinator.getDataShowingListForTesting();
+        // Should contain: Default, Orange, Violet, localColor1 (blue), remoteColor1 (cyan).
+        assertEquals(5, dataList.size());
+        assertEquals(
+                NtpThemeColorId.DEFAULT,
+                ((NtpBackgroundDataColor) dataList.get(0)).getThemeColorId());
+        assertEquals(
+                NtpThemeColorId.NTP_COLORS_ORANGE,
+                ((NtpBackgroundDataColor) dataList.get(1)).getThemeColorId());
+        assertEquals(
+                NtpThemeColorId.NTP_COLORS_VIOLET,
+                ((NtpBackgroundDataColor) dataList.get(2)).getThemeColorId());
+        assertEquals(
+                NtpThemeColorId.NTP_COLORS_BLUE,
+                ((NtpBackgroundDataColor) dataList.get(3)).getThemeColorId());
+        assertEquals(remoteColor1, dataList.get(4));
+        assertEquals(
+                3, (int) mPropertyModel.get(NtpThemeSyncHistoryProperties.HIGHLIGHTED_ITEM_INDEX));
+
+        // 2. Update Setup: add new local (VIRIDIAN), add new remote (GREEN).
+        NtpBackgroundDataColor localColor2 =
+                new NtpBackgroundDataColor(
+                        mContext,
+                        PlatformType.ANDROID,
+                        NtpThemeColorId.NTP_COLORS_VIRIDIAN,
+                        /* isChromeColorDailyRefreshEnabled= */ false);
+        mNtpBackgroundDataManager.saveUserSelectedBackgroundTypeToSharedPreference(localColor2);
+
+        NtpBackgroundDataCustomizedColor remoteColor2 =
+                new NtpBackgroundDataCustomizedColor(
+                        mContext,
+                        PlatformType.IOS,
+                        /* primaryColorLight= */ Color.GREEN,
+                        /* primaryColorDark= */ Color.GREEN,
+                        /* ntpBackgroundColorLight= */ Color.WHITE,
+                        /* ntpBackgroundColorDark= */ Color.BLACK);
+        mNtpBackgroundDataManager.saveRemoteSyncDataToSharedPreference(remoteColor2);
+
+        when(mNtpCustomizationConfigManager.getNtpBackgroundData()).thenReturn(localColor2);
+
+        // Call second time.
+        mCoordinator.prepareToShow();
+
+        dataList = mCoordinator.getDataShowingListForTesting();
+        // Should contain: Default, Orange, Violet, localColor2 (viridian), localColor1 (blue),
+        // remoteColor1 (cyan)
+        // remoteColor2 (green) should NOT be here because remote history is not reloaded.
+        assertEquals(6, dataList.size());
+        assertEquals(
+                NtpThemeColorId.DEFAULT,
+                ((NtpBackgroundDataColor) dataList.get(0)).getThemeColorId());
+        assertEquals(
+                NtpThemeColorId.NTP_COLORS_ORANGE,
+                ((NtpBackgroundDataColor) dataList.get(1)).getThemeColorId());
+        assertEquals(
+                NtpThemeColorId.NTP_COLORS_VIOLET,
+                ((NtpBackgroundDataColor) dataList.get(2)).getThemeColorId());
+        assertEquals(
+                NtpThemeColorId.NTP_COLORS_VIRIDIAN,
+                ((NtpBackgroundDataColor) dataList.get(3)).getThemeColorId());
+        assertEquals(
+                NtpThemeColorId.NTP_COLORS_BLUE,
+                ((NtpBackgroundDataColor) dataList.get(4)).getThemeColorId());
+        assertEquals(remoteColor1, dataList.get(5));
+
+        // Highlighted index should be 3 (localColor2, the new first local history item).
+        assertEquals(
+                3, (int) mPropertyModel.get(NtpThemeSyncHistoryProperties.HIGHLIGHTED_ITEM_INDEX));
+    }
+
+    @Test
+    public void testPrepareToShow_WithLocalHistoryContainingDefaultOption() {
+        // Save ORANGE (one of the extra default options) as local history.
+        NtpBackgroundDataColor localColor =
+                new NtpBackgroundDataColor(
+                        mContext,
+                        PlatformType.ANDROID,
+                        NtpThemeColorId.NTP_COLORS_ORANGE,
+                        /* isChromeColorDailyRefreshEnabled= */ false);
+        mNtpBackgroundDataManager.saveUserSelectedBackgroundTypeToSharedPreference(localColor);
+
+        when(mNtpCustomizationConfigManager.getNtpBackgroundData()).thenReturn(localColor);
+
+        mCoordinator.prepareToShow();
+
+        List<NtpBackgroundDataBase> dataList = mCoordinator.getDataShowingListForTesting();
+        // Should contain 3 items: DEFAULT, VIOLET (default option), and ORANGE (local history).
+        assertEquals(3, dataList.size());
+        assertEquals(
+                NtpThemeColorId.DEFAULT,
+                ((NtpBackgroundDataColor) dataList.get(0)).getThemeColorId());
+        assertEquals(
+                NtpThemeColorId.NTP_COLORS_VIOLET,
+                ((NtpBackgroundDataColor) dataList.get(1)).getThemeColorId());
+        assertEquals(
+                NtpThemeColorId.NTP_COLORS_ORANGE,
+                ((NtpBackgroundDataColor) dataList.get(2)).getThemeColorId());
+
+        // Highlighted index should be 2 (the local history item)
+        assertEquals(
+                2, (int) mPropertyModel.get(NtpThemeSyncHistoryProperties.HIGHLIGHTED_ITEM_INDEX));
+    }
+
+    @Test
+    public void testPrepareToShow_WithMaxLocalHistory() {
+        // Save 3 local history items (reaches MAXIMUM_LOCAL_HISTORY).
+        NtpBackgroundDataColor localColor1 =
+                new NtpBackgroundDataColor(
+                        mContext,
+                        PlatformType.ANDROID,
+                        NtpThemeColorId.NTP_COLORS_BLUE,
+                        /* isChromeColorDailyRefreshEnabled= */ false);
+        mNtpBackgroundDataManager.saveUserSelectedBackgroundTypeToSharedPreference(localColor1);
+        NtpBackgroundDataColor localColor2 =
+                new NtpBackgroundDataColor(
+                        mContext,
+                        PlatformType.ANDROID,
+                        NtpThemeColorId.NTP_COLORS_AQUA,
+                        /* isChromeColorDailyRefreshEnabled= */ false);
+        mNtpBackgroundDataManager.saveUserSelectedBackgroundTypeToSharedPreference(localColor2);
+        NtpBackgroundDataColor localColor3 =
+                new NtpBackgroundDataColor(
+                        mContext,
+                        PlatformType.ANDROID,
+                        NtpThemeColorId.NTP_COLORS_GREEN,
+                        /* isChromeColorDailyRefreshEnabled= */ false);
+        mNtpBackgroundDataManager.saveUserSelectedBackgroundTypeToSharedPreference(localColor3);
+
+        when(mNtpCustomizationConfigManager.getNtpBackgroundData()).thenReturn(localColor2);
+
+        mCoordinator.prepareToShow();
+
+        List<NtpBackgroundDataBase> dataList = mCoordinator.getDataShowingListForTesting();
+        // Should contain 4 items: only DEFAULT from default options, then the 3 local history
+        // items.
+        assertEquals(4, dataList.size());
+        assertEquals(
+                NtpThemeColorId.DEFAULT,
+                ((NtpBackgroundDataColor) dataList.get(0)).getThemeColorId());
+        assertEquals(
+                NtpThemeColorId.NTP_COLORS_GREEN,
+                ((NtpBackgroundDataColor) dataList.get(1)).getThemeColorId());
+        assertEquals(
+                NtpThemeColorId.NTP_COLORS_AQUA,
+                ((NtpBackgroundDataColor) dataList.get(2)).getThemeColorId());
+        assertEquals(
+                NtpThemeColorId.NTP_COLORS_BLUE,
+                ((NtpBackgroundDataColor) dataList.get(3)).getThemeColorId());
+
+        // Highlighted index should be 2 (localColor2)
+        assertEquals(
+                2, (int) mPropertyModel.get(NtpThemeSyncHistoryProperties.HIGHLIGHTED_ITEM_INDEX));
+    }
+}
