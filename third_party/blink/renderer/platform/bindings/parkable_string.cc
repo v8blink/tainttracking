@@ -410,6 +410,20 @@ const String& ParkableStringImpl::ToString() {
   return string_;
 }
 
+const StringTaint& ParkableStringImpl::Taint() const {
+  if (string_.Impl()) {
+    return string_.Impl()->Taint();
+  }
+  static const StringTaint kEmptyTaint;
+  return kEmptyTaint;
+}
+
+void ParkableStringImpl::SetTaint(const StringTaint& taint) {
+  if (string_.Impl()) {
+    string_.Impl()->SetTaint(taint);
+  }
+}
+
 size_t ParkableStringImpl::CharactersSizeInBytes() const {
   if (!may_be_parked())
     return string_.CharactersSizeInBytes();

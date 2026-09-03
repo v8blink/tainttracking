@@ -22,6 +22,7 @@
  */
 
 #include "third_party/blink/renderer/core/html/html_script_element.h"
+#include "third_party/blink/renderer/core/tainting/taint_util.h"
 
 #include "third_party/blink/public/common/features.h"
 #include "third_party/blink/public/mojom/script/script_type.mojom-blink.h"
@@ -220,6 +221,7 @@ void HTMLScriptElement::setScriptTextContentForBinding(
       trusted_types_names::kTextContent, exception_state);
   if (exception_state.HadException())
     return;
+  ReportTaintSink(string, "script.textContent", this);
   setTextContent(string);
 }
 
@@ -232,7 +234,9 @@ void HTMLScriptElement::setTextContent(const String& string) {
 }
 
 String HTMLScriptElement::scriptTextContentForBinding() {
-  return textContentForBinding();
+  String result = textContentForBinding();
+  MarkTaintSource(result, "script.innerHTML");
+  return result;
 }
 
 String HTMLScriptElement::scriptInnerTextForBinding() {
@@ -252,6 +256,7 @@ void HTMLScriptElement::setText(V8UnionStringOrTrustedScript* value,
   if (exception_state.HadException()) {
     return;
   }
+  ReportTaintSink(compliant_value, "script.text", this);
   setTextContent(compliant_value);
 }
 

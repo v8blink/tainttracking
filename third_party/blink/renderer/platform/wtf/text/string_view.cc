@@ -268,6 +268,28 @@ bool StringView::ends_with(const StringView& other) const {
          substr(length() - other.length(), other.length()) == other;
 }
 
+bool StringView::isTainted() const {
+  return Taint().hasTaint();
+}
+
+SafeStringTaint StringView::Taint() const {
+  if (IsNull() || empty())
+    return SafeStringTaint();
+  if (!impl_ || !impl_->isTainted())
+    return SafeStringTaint();
+  const uint8_t* impl_start = impl_->RawByteSpan().data();
+  const uint8_t* view_start = static_cast<const uint8_t*>(bytes_);
+  if (view_start < impl_start)
+    return SafeStringTaint();
+  const size_t char_size = Is8Bit() ? sizeof(LChar) : sizeof(UChar);
+  const size_t byte_offset = static_cast<size_t>(view_start - impl_start);
+  if (byte_offset % char_size != 0)
+    return SafeStringTaint();
+  const size_t offset = byte_offset / char_size;
+  return impl_->Taint().safeSubTaint(static_cast<uint32_t>(offset),
+                                     static_cast<uint32_t>(offset + length_));
+}
+
 String StringView::ToString() const {
   if (IsNull())
     return String();
@@ -275,9 +297,14 @@ String StringView::ToString() const {
     return g_empty_string;
   if (StringImpl* impl = SharedImpl())
     return impl;
+  String result;
   if (Is8Bit())
-    return String(Span8());
-  return StringImpl::Create8BitIfPossible(Span16());
+    result = String(Span8());
+  else
+    result = StringImpl::Create8BitIfPossible(Span16());
+  if (isTainted() && result.Impl() && result.length())
+    result.SetTaint(Taint());
+  return result;
 }
 
 AtomicString StringView::ToAtomicString() const {

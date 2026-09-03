@@ -309,6 +309,10 @@ void MojoURLLoaderClient::OnReceiveResponse(
   TRACE_EVENT1("loading", "MojoURLLoaderClient::OnReceiveResponse", "url",
                last_loaded_url_.GetString().Utf8());
 
+  if (response_head && response_head->body_taint && response_head->headers) {
+    response_head->headers->SetHeader("X-Taint", *response_head->body_taint);
+  }
+
   // OnReceiveResponse() can be called at most once. This check is added to
   // debug crbug.com/463388771.
   CHECK(!has_received_response_head_);

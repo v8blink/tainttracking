@@ -63,15 +63,6 @@ struct DowncastTraits<ClassCollection> {
   }
 };
 
-inline bool ClassCollection::ElementMatches(const Element& test_element) const {
-  if (!test_element.HasClass())
-    return false;
-  if (!class_names_->value.size()) {
-    return false;
-  }
-  return test_element.ClassNames().ContainsAll(class_names_->value);
-}
-
 }  // namespace blink
 
 #endif  // THIRD_PARTY_BLINK_RENDERER_CORE_DOM_CLASS_COLLECTION_H_

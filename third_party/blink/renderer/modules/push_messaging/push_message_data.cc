@@ -3,6 +3,7 @@
 // found in the LICENSE file.
 
 #include "third_party/blink/renderer/modules/push_messaging/push_message_data.h"
+#include "third_party/blink/renderer/core/tainting/taint_util.h"
 
 #include <memory>
 
@@ -91,7 +92,9 @@ ScriptValue PushMessageData::json(ScriptState* script_state) const {
 }
 
 String PushMessageData::text() const {
-  return Utf8Encoding().Decode(data_);
+  String result = Utf8Encoding().Decode(data_);
+  MarkTaintSource(result, "PushMessageData");
+  return result;
 }
 
 }  // namespace blink

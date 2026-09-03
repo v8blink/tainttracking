@@ -158,6 +158,8 @@ bool ConsumeHTMLEntity(SegmentedString& source,
   DCHECK(!not_enough_characters);
   DCHECK(decoded_entity.IsEmpty());
 
+  decoded_entity.taint_ = source.CurrentTaint();
+
   enum EntityState {
     kInitial,
     kNumber,

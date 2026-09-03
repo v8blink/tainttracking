@@ -1558,7 +1558,11 @@ Element* ContainerNode::QuerySelector(const AtomicString& selectors,
       selectors, GetDocument(), exception_state);
   if (!selector_query)
     return nullptr;
-  return selector_query->QueryFirst(*this);
+  Element* result = selector_query->QueryFirst(*this);
+  if (result) {
+    result->TaintSelectorOperation("document.querySelector");
+  }
+  return result;
 }
 
 Element* ContainerNode::QuerySelector(const AtomicString& selectors) {
@@ -1572,7 +1576,13 @@ StaticElementList* ContainerNode::QuerySelectorAll(
       selectors, GetDocument(), exception_state);
   if (!selector_query)
     return nullptr;
-  return selector_query->QueryAll(*this);
+  StaticElementList* result = selector_query->QueryAll(*this);
+  if (result) {
+    for (unsigned i = 0; i < result->length(); ++i) {
+      result->item(i)->TaintSelectorOperation("document.querySelectorAll");
+    }
+  }
+  return result;
 }
 
 StaticElementList* ContainerNode::QuerySelectorAll(

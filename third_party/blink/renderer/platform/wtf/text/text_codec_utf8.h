@@ -29,6 +29,7 @@
 #include <unicode/utf8.h>
 #include <memory>
 
+#include "taint/Taint.h"
 #include "third_party/blink/renderer/platform/wtf/text/text_codec.h"
 
 namespace blink {
@@ -40,6 +41,12 @@ class TextCodecUtf8 : public TextCodec {
   // Returns true if the given `canonical_name` is supported.
   // This function ignores ASCII cases.
   static bool IsSupported(StringView canonical_name);
+
+  String Decode(base::span<const uint8_t> data,
+                FlushBehavior,
+                bool stop_on_error,
+                bool& saw_error,
+                const StringTaint& taint);
 
  protected:
   TextCodecUtf8() : partial_sequence_size_(0) {}

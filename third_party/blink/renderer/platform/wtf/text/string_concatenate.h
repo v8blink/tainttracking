@@ -57,6 +57,8 @@ class StringTypeAdapter<char> {
     destination[0] = buffer_;
   }
 
+  SafeStringTaint Taint() const { return SafeStringTaint(); }
+
  private:
   const LChar buffer_;
 };
@@ -87,6 +89,8 @@ class StringTypeAdapter<UChar> {
     destination[0] = buffer_;
   }
 
+  SafeStringTaint Taint() const { return SafeStringTaint(); }
+
  private:
   const UChar buffer_;
 };
@@ -104,6 +108,8 @@ class WTF_EXPORT StringTypeAdapter<const char*> {
 
   void WriteTo(base::span<LChar> destination) const;
   void WriteTo(base::span<UChar> destination) const;
+
+  SafeStringTaint Taint() const { return SafeStringTaint(); }
 
  private:
   const base::span<const LChar> buffer_;
@@ -146,6 +152,8 @@ class WTF_EXPORT StringTypeAdapter<const UChar*> {
   void WriteTo(base::span<LChar> destination) const { NOTREACHED(); }
   void WriteTo(base::span<UChar> destination) const;
 
+  SafeStringTaint Taint() const { return SafeStringTaint(); }
+
  private:
   const base::span<const UChar> buffer_;
 };
@@ -162,6 +170,8 @@ class WTF_EXPORT StringTypeAdapter<StringView> {
 
   void WriteTo(base::span<LChar> destination) const;
   void WriteTo(base::span<UChar> destination) const;
+
+  SafeStringTaint Taint() const { return view_.Taint(); }
 
  private:
   const StringView view_;

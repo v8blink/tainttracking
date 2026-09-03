@@ -25,6 +25,7 @@
  */
 
 #include "third_party/blink/renderer/core/dom/node.h"
+#include "third_party/blink/renderer/core/tainting/taint_util.h"
 
 #include <algorithm>
 
@@ -1013,8 +1014,15 @@ void Node::prepend(
   if (exception_state.HadException()) {
     return;
   }
+  StringBuilder prepend_text;
+  for (const auto& taint_child : node_vector) {
+    prepend_text.Append(taint_child->textContent());
+  }
+  Node* prepend_node = node_vector.size() ? node_vector.front().Get() : nullptr;
   this_node->InsertBefore(node_vector, this_node->firstChild(),
                           exception_state);
+  ReportTaintSink(prepend_text.ReleaseString(), "element.prepend",
+                  prepend_node);
 }
 
 void Node::append(
@@ -1034,7 +1042,13 @@ void Node::append(
   if (exception_state.HadException()) {
     return;
   }
+  StringBuilder append_text;
+  for (const auto& taint_child : node_vector) {
+    append_text.Append(taint_child->textContent());
+  }
+  Node* append_node = node_vector.size() ? node_vector.front().Get() : nullptr;
   this_node->AppendChildren(node_vector, exception_state);
+  ReportTaintSink(append_text.ReleaseString(), "element.append", append_node);
 }
 
 void Node::before(
@@ -1050,11 +1064,17 @@ void Node::before(
   if (exception_state.HadException()) {
     return;
   }
+  StringBuilder before_text;
+  for (const auto& taint_child : node_vector) {
+    before_text.Append(taint_child->textContent());
+  }
+  Node* before_node = node_vector.size() ? node_vector.front().Get() : nullptr;
   parent->InsertBefore(node_vector,
                        viable_previous_sibling
                            ? viable_previous_sibling->nextSibling()
                            : parent->firstChild(),
                        exception_state);
+  ReportTaintSink(before_text.ReleaseString(), "element.before", before_node);
 }
 
 void Node::after(
@@ -1070,7 +1090,13 @@ void Node::after(
   if (exception_state.HadException()) {
     return;
   }
+  StringBuilder after_text;
+  for (const auto& taint_child : node_vector) {
+    after_text.Append(taint_child->textContent());
+  }
+  Node* after_node = node_vector.size() ? node_vector.front().Get() : nullptr;
   parent->InsertBefore(node_vector, viable_next_sibling, exception_state);
+  ReportTaintSink(after_text.ReleaseString(), "element.after", after_node);
 }
 
 namespace {
@@ -2185,7 +2211,10 @@ Document* Node::ownerDocument() const {
 }
 
 const KURL& Node::baseURI() const {
-  return GetDocument().BaseURL();
+  const KURL& result = GetDocument().BaseURL();
+  String taint_target = result.GetString();
+  MarkTaintSource(taint_target, "document.baseURI");
+  return result;
 }
 
 bool Node::isEqualNode(Node* other) const {
@@ -2411,7 +2440,9 @@ String Node::textContent(bool convert_brs_to_newlines,
     }
   }
 
-  return content.ReleaseString();
+  String result = content.ReleaseString();
+  MarkTaintOperation(result, "element.textContent");
+  return result;
 }
 
 String Node::textContentForBinding() const {

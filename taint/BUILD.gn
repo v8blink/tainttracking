@@ -1,0 +1,9 @@
+source_set("taint") {
+  sources = [
+    "Taint.cpp",
+    "Taint.h",
+    "json.hpp",
+    "md5_utils.c",
+    "md5_utils.h",
+  ]
+}

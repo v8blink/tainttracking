@@ -37,6 +37,8 @@ namespace blink {
 // Compliant with https://infra.spec.whatwg.org/#forgiving-base64-encode.
 WTF_EXPORT void Base64Encode(base::span<const uint8_t>, Vector<char>&);
 [[nodiscard]] WTF_EXPORT String Base64Encode(base::span<const uint8_t>);
+[[nodiscard]] WTF_EXPORT String Base64Encode(base::span<const uint8_t>,
+                                             const StringTaint& taint);
 
 enum class Base64DecodePolicy {
   // Compliant with https://infra.spec.whatwg.org/#forgiving-base64-decode.
@@ -51,6 +53,12 @@ enum class Base64DecodePolicy {
 WTF_EXPORT bool Base64Decode(
     const StringView&,
     Vector<uint8_t>&,
+    Base64DecodePolicy policy = Base64DecodePolicy::kNoPaddingValidation);
+
+WTF_EXPORT bool Base64Decode(
+    const StringView&,
+    Vector<uint8_t>&,
+    StringTaint& out_taint,
     Base64DecodePolicy policy = Base64DecodePolicy::kNoPaddingValidation);
 
 WTF_EXPORT bool Base64UnpaddedUrlDecode(const String& in, Vector<uint8_t>&);

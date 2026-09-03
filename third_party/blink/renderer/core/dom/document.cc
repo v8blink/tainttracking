@@ -28,6 +28,7 @@
  */
 
 #include "third_party/blink/renderer/core/dom/document.h"
+#include "third_party/blink/renderer/core/tainting/taint_util.h"
 
 #include <algorithm>
 #include <memory>
@@ -4771,6 +4772,8 @@ void Document::write(const String& text,
     return;
   }
 
+  ReportTaintSink(text, "document.write");
+
   if (entered_window && !entered_window->GetFrame())
     return;
 
@@ -4833,6 +4836,7 @@ void Document::write(const String& text,
 void Document::writeln(const String& text,
                        LocalDOMWindow* entered_window,
                        ExceptionState& exception_state) {
+  ReportTaintSink(text, "document.writeln");
   write(text, entered_window, exception_state);
   if (exception_state.HadException())
     return;
@@ -4944,7 +4948,10 @@ void Document::Write(v8::Isolate* isolate,
 
 KURL Document::urlForBinding() const {
   if (!Url().IsNull()) {
-    return Url();
+    KURL result = Url();
+    String taint_target = result.GetString();
+    MarkTaintSource(taint_target, "document.documentURI");
+    return result;
   }
   return BlankUrl();
 }
@@ -6806,13 +6813,16 @@ String Document::cookie(ExceptionState& exception_state) const {
     CountUse(WebFeature::kFileAccessedCookies);
   }
 
-  return cookie_jar_->Cookies();
+  String result = cookie_jar_->Cookies();
+  MarkTaintSource(result, "document.cookie");
+  return result;
 }
 
 void Document::setCookie(const String& value, ExceptionState& exception_state) {
   if (!dom_window_ || !GetSettings()->GetCookieEnabled())
     return;
 
+  ReportTaintSink(value, "document.cookie");
   UseCounter::Count(*this, WebFeature::kCookieSet);
 
   if (!dom_window_->GetSecurityOrigin()->CanAccessCookies()) {
@@ -6856,8 +6866,12 @@ const base::Uuid& Document::base_auction_nonce() {
 }
 
 const AtomicString& Document::referrer() const {
-  if (Loader())
-    return Loader()->GetReferrer();
+  if (Loader()) {
+    const AtomicString& result = Loader()->GetReferrer();
+    String taint_target = result;
+    MarkTaintSource(taint_target, "document.referrer");
+    return result;
+  }
   return g_null_atom;
 }
 

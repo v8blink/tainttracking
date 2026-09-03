@@ -6,6 +6,7 @@
 // authority section including a host name.
 
 #include "base/compiler_specific.h"
+#include "taint/Taint.h"
 #include "url/url_canon.h"
 #include "url/url_canon_internal.h"
 #include "url/url_constants.h"
@@ -13,6 +14,29 @@
 namespace url {
 
 namespace {
+
+void PropagateStandardUrlTaint(const StringTaint& source_taint,
+                               const Parsed& in,
+                               const Parsed& out,
+                               CanonOutput* output) {
+  StringTaint* result = output->result_taint();
+  if (!result) {
+    return;
+  }
+  auto copy_segment = [&](const Component& src, const Component& dst) {
+    if (src.is_nonempty() && dst.is_nonempty()) {
+      result->concat(
+          source_taint.safeSubTaint(static_cast<uint32_t>(src.begin),
+                                    static_cast<uint32_t>(src.begin + src.len)),
+          static_cast<uint32_t>(dst.begin));
+    }
+  };
+  copy_segment(in.scheme, out.scheme);
+  copy_segment(in.host, out.host);
+  copy_segment(in.path, out.path);
+  copy_segment(in.query, out.query);
+  copy_segment(in.ref, out.ref);
+}
 
 template <typename CHAR>
 bool DoCanonicalizeStandardUrl(const Replacements<CHAR>& source,
@@ -108,6 +132,11 @@ bool DoCanonicalizeStandardUrl(const Replacements<CHAR>& source,
   // Carry over the flag for potentially dangling markup:
   if (parsed.potentially_dangling_markup)
     new_parsed->potentially_dangling_markup = true;
+
+  if (output->source_taint()) {
+    PropagateStandardUrlTaint(*output->source_taint(), parsed, *new_parsed,
+                              output);
+  }
 
   return success;
 }

@@ -87,6 +87,16 @@ String Base64Encode(base::span<const uint8_t> data) {
   return result.Release();
 }
 
+String Base64Encode(base::span<const uint8_t> data, const StringTaint& taint) {
+  String result = Base64Encode(data);
+  if (taint.hasTaint() && result.Impl()) {
+    SafeStringTaint encoded_taint(taint);
+    encoded_taint.toBase64();
+    result.Impl()->SetTaint(encoded_taint);
+  }
+  return result;
+}
+
 void Base64Encode(base::span<const uint8_t> data, Vector<char>& out) {
   size_t encode_len = modp_b64_encode_data_len(data.size());
   CHECK_LE(data.size(), MODP_B64_MAX_INPUT_LEN);
@@ -122,6 +132,18 @@ bool Base64Decode(const StringView& in,
       return Base64DecodeRaw(in, out, policy);
     }
   }
+}
+
+bool Base64Decode(const StringView& in,
+                  Vector<uint8_t>& out,
+                  StringTaint& out_taint,
+                  Base64DecodePolicy policy) {
+  bool success = Base64Decode(in, out, policy);
+  if (success && in.isTainted()) {
+    out_taint = in.Taint();
+    out_taint.fromBase64();
+  }
+  return success;
 }
 
 bool Base64UnpaddedUrlDecode(const String& in, Vector<uint8_t>& out) {

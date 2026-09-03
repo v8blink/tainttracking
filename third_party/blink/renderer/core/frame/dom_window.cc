@@ -3,6 +3,7 @@
 // found in the LICENSE file.
 
 #include "third_party/blink/renderer/core/frame/dom_window.h"
+#include "third_party/blink/renderer/core/tainting/taint_util.h"
 
 #include <algorithm>
 #include <memory>
@@ -431,6 +432,7 @@ void DOMWindow::postMessage(v8::Isolate* isolate,
                             const String& target_origin,
                             HeapVector<ScriptObject> transfer,
                             ExceptionState& exception_state) {
+  ReportTaintSink(target_origin, "window.postMessage");
   WindowPostMessageOptions* options = WindowPostMessageOptions::Create();
   options->setTargetOrigin(target_origin);
   if (!transfer.empty())

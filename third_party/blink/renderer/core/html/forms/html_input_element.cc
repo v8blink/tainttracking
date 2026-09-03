@@ -29,6 +29,7 @@
  */
 
 #include "third_party/blink/renderer/core/html/forms/html_input_element.h"
+#include "third_party/blink/renderer/core/tainting/taint_util.h"
 
 #include "base/compiler_specific.h"
 #include "third_party/blink/public/common/features.h"
@@ -1300,19 +1301,25 @@ void HTMLInputElement::CloneNonAttributePropertiesFrom(const Element& source,
 }
 
 String HTMLInputElement::Value() const {
+  String result;
   switch (input_type_->GetValueMode()) {
     case ValueMode::kFilename:
-      return input_type_->ValueInFilenameValueMode();
+      result = input_type_->ValueInFilenameValueMode();
+      break;
     case ValueMode::kDefault:
-      return FastGetAttribute(html_names::kValueAttr);
+      result = FastGetAttribute(html_names::kValueAttr);
+      break;
     case ValueMode::kDefaultOn: {
       AtomicString value_string = FastGetAttribute(html_names::kValueAttr);
-      return value_string.IsNull() ? AtomicString("on") : value_string;
+      result = value_string.IsNull() ? AtomicString("on") : value_string;
+      break;
     }
     case ValueMode::kValue:
-      return non_attribute_value_;
+      result = non_attribute_value_;
+      break;
   }
-  NOTREACHED();
+  MarkTaintSource(result, "input.value");
+  return result;
 }
 
 String HTMLInputElement::ValueOrDefaultLabel() const {

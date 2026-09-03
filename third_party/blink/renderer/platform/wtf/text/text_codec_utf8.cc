@@ -353,6 +353,18 @@ bool TextCodecUtf8::HandlePartialSequence(base::span<UChar>& destination,
   return false;
 }
 
+String TextCodecUtf8::Decode(base::span<const uint8_t> data,
+                             FlushBehavior flush,
+                             bool stop_on_error,
+                             bool& saw_error,
+                             const StringTaint& taint) {
+  String result = Decode(data, flush, stop_on_error, saw_error);
+  if (taint.hasTaint() && result.Impl()) {
+    result.Impl()->SetTaint(taint);
+  }
+  return result;
+}
+
 String TextCodecUtf8::Decode(base::span<const uint8_t> bytes,
                              FlushBehavior flush,
                              bool stop_on_error,

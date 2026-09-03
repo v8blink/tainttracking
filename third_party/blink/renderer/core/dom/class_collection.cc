@@ -57,4 +57,18 @@ ClassCollection::ClassCollection(ContainerNode& root_node,
 
 ClassCollection::~ClassCollection() = default;
 
+bool ClassCollection::ElementMatches(const Element& test_element) const {
+  if (!test_element.HasClass())
+    return false;
+  if (!class_names_->value.size()) {
+    return false;
+  }
+  if (!test_element.ClassNames().ContainsAll(class_names_->value)) {
+    return false;
+  }
+  const_cast<Element&>(test_element)
+      .TaintSelectorOperation("document.getElementsByClassName");
+  return true;
+}
+
 }  // namespace blink

@@ -31,6 +31,7 @@
  */
 
 #include "third_party/blink/renderer/modules/eventsource/event_source.h"
+#include "third_party/blink/renderer/core/tainting/taint_util.h"
 
 #include <algorithm>
 #include <memory>
@@ -113,6 +114,7 @@ EventSource* EventSource::Create(ExecutionContext* context,
                                  ? WebFeature::kEventSourceDocument
                                  : WebFeature::kEventSourceWorker);
 
+  ReportTaintSink(url, "EventSource");
   KURL full_url = context->CompleteURL(url);
   if (!full_url.IsValid()) {
     exception_state.ThrowDOMException(DOMExceptionCode::kSyntaxError,

@@ -140,7 +140,10 @@ void String::Ensure16Bit() {
   if (!Is8Bit())
     return;
   if (!empty()) {
+    SafeStringTaint saved_taint(impl_->Taint());
     impl_ = Make16BitFrom8BitSource(impl_->Span8()).ReleaseImpl();
+    if (saved_taint.hasTaint() && impl_ && impl_->length())
+      impl_->SetTaint(saved_taint);
   } else {
     impl_ = StringImpl::empty16_bit_;
   }

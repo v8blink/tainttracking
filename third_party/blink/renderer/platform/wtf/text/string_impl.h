@@ -53,6 +53,8 @@
 #include "third_party/blink/renderer/platform/wtf/vector.h"
 #include "third_party/blink/renderer/platform/wtf/wtf_export.h"
 
+#include "taint/Taint.h"
+
 #if BUILDFLAG(IS_APPLE)
 #include "base/apple/scoped_cftyperef.h"
 
@@ -107,7 +109,8 @@ class WTF_EXPORT StringImpl {
   explicit StringImpl(ConstructEmptyStringTag)
       : length_(0),
         hash_and_flags_(kAsciiPropertyCheckDone | kContainsOnlyAscii |
-                        kIsLowerAscii | kIs8Bit | kIsStatic) {
+                        kIsLowerAscii | kIs8Bit | kIsStatic),
+        taint_() {
     // Ensure that the hash is computed so that AtomicStringHash can call
     // existingHash() with impunity. The empty string is special because it
     // is never entered into AtomicString's HashKey, but still needs to
@@ -119,19 +122,24 @@ class WTF_EXPORT StringImpl {
   explicit StringImpl(ConstructEmptyString16BitTag)
       : length_(0),
         hash_and_flags_(kAsciiPropertyCheckDone | kContainsOnlyAscii |
-                        kIsLowerAscii | kIsStatic) {
+                        kIsLowerAscii | kIsStatic),
+        taint_() {
     GetHash();
   }
 
   // FIXME: there has to be a less hacky way to do this.
   enum Force8Bit { kForce8BitConstructor };
   StringImpl(size_type length, Force8Bit)
-      : length_(length), hash_and_flags_(LengthToAsciiFlags(length) | kIs8Bit) {
+      : length_(length),
+        hash_and_flags_(LengthToAsciiFlags(length) | kIs8Bit),
+        taint_() {
     DCHECK(length_);
   }
 
   StringImpl(size_type length)
-      : length_(length), hash_and_flags_(LengthToAsciiFlags(length)) {
+      : length_(length),
+        hash_and_flags_(LengthToAsciiFlags(length)),
+        taint_() {
     DCHECK(length_);
   }
 
@@ -139,7 +147,8 @@ class WTF_EXPORT StringImpl {
   StringImpl(size_type length, wtf_size_t hash, StaticStringTag)
       : length_(length),
         hash_and_flags_(hash << kHashShift | LengthToAsciiFlags(length) |
-                        kIs8Bit | kIsStatic) {}
+                        kIs8Bit | kIsStatic),
+        taint_() {}
 
  public:
   REQUIRE_ADOPTION_FOR_REFCOUNTED_TYPE();
@@ -237,6 +246,11 @@ class WTF_EXPORT StringImpl {
   bool IsStatic() const {
     return hash_and_flags_.load(std::memory_order_relaxed) & kIsStatic;
   }
+
+  const StringTaint& Taint() const { return taint_; }
+  StringTaint& Taint() { return taint_; }
+  void SetTaint(const StringTaint& taint) { taint_ = taint; }
+  bool isTainted() const { return taint_.hasTaint(); }
 
   bool ContainsOnlyAsciiOrEmpty() const;
   bool ContainsNoAsciiUpper() const;
@@ -666,6 +680,7 @@ class WTF_EXPORT StringImpl {
   mutable std::atomic_uint32_t ref_count_{1};
   const size_type length_;
   mutable std::atomic<uint32_t> hash_and_flags_;
+  SafeStringTaint taint_;
 };
 
 template <>

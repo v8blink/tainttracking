@@ -47,6 +47,10 @@ class ClosedBytesConsumer final : public BytesConsumer {
 
 }  // namespace
 
+StringTaint BytesConsumer::GetTaint() const {
+  return StringTaint();
+}
+
 BytesConsumer* BytesConsumer::CreateErrored(const BytesConsumer::Error& error) {
   return MakeGarbageCollected<ErroredBytesConsumer>(error);
 }

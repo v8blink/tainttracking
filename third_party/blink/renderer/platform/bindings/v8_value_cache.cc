@@ -82,6 +82,11 @@ void StringCache::Dispose() {
 
 static v8::Local<v8::String> MakeExternalString(v8::Isolate* isolate,
                                                 String string) {
+  bool tainted = string.IsTainted();
+  StringTaint wtf_taint;
+  if (tainted && string.Impl()) {
+    wtf_taint = string.Impl()->Taint();
+  }
   if (string.Is8Bit()) {
     StringResource8* string_resource =
         new StringResource8(isolate, std::move(string));
@@ -91,6 +96,9 @@ static v8::Local<v8::String> MakeExternalString(v8::Isolate* isolate,
       string_resource->Unaccount(isolate);
       delete string_resource;
       return v8::String::Empty(isolate);
+    }
+    if (tainted) {
+      new_string->SetTaint(isolate, wtf_taint);
     }
     return new_string;
   }
@@ -104,11 +112,19 @@ static v8::Local<v8::String> MakeExternalString(v8::Isolate* isolate,
     delete string_resource;
     return v8::String::Empty(isolate);
   }
+  if (tainted) {
+    new_string->SetTaint(isolate, wtf_taint);
+  }
   return new_string;
 }
 
 static v8::Local<v8::String> MakeExternalString(v8::Isolate* isolate,
                                                 const ParkableString string) {
+  const bool has_taint = string.Impl() && string.Impl()->Taint().hasTaint();
+  StringTaint captured_taint;
+  if (has_taint) {
+    captured_taint = string.Impl()->Taint();
+  }
   if (string.Is8Bit()) {
     auto* string_resource =
         new ParkableStringResource8(isolate, std::move(string));
@@ -118,6 +134,9 @@ static v8::Local<v8::String> MakeExternalString(v8::Isolate* isolate,
       string_resource->Unaccount(isolate);
       delete string_resource;
       return v8::String::Empty(isolate);
+    }
+    if (has_taint) {
+      new_string->SetTaint(isolate, captured_taint);
     }
     return new_string;
   }
@@ -130,6 +149,9 @@ static v8::Local<v8::String> MakeExternalString(v8::Isolate* isolate,
     string_resource->Unaccount(isolate);
     delete string_resource;
     return v8::String::Empty(isolate);
+  }
+  if (has_taint) {
+    new_string->SetTaint(isolate, captured_taint);
   }
   return new_string;
 }

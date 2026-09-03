@@ -26,6 +26,7 @@
  */
 
 #include "third_party/blink/renderer/core/events/message_event.h"
+#include "third_party/blink/renderer/core/tainting/taint_util.h"
 
 #include <memory>
 
@@ -403,6 +404,7 @@ ScriptValue MessageEvent::data(ScriptState* script_state) {
       break;
   }
 
+  MarkTaintSource(script_state, value, "MessageEvent");
   return ScriptValue(isolate, value);
 }
 

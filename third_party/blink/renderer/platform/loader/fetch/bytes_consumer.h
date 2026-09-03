@@ -13,6 +13,7 @@
 #include "third_party/blink/renderer/platform/heap/garbage_collected.h"
 #include "third_party/blink/renderer/platform/network/encoded_form_data.h"
 #include "third_party/blink/renderer/platform/platform_export.h"
+#include "taint/Taint.h"
 #include "third_party/blink/renderer/platform/wtf/text/wtf_string.h"
 
 namespace blink {
@@ -161,6 +162,8 @@ class PLATFORM_EXPORT BytesConsumer : public GarbageCollected<BytesConsumer> {
   // Each implementation should return a string that represents the
   // implementation for debug purpose.
   virtual String DebugName() const = 0;
+
+  virtual StringTaint GetTaint() const;
 
   // Returns a BytesConsumer whose state is Closed.
   static BytesConsumer* CreateClosed();

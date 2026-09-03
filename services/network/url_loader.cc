@@ -967,6 +967,12 @@ mojom::URLResponseHeadPtr URLLoader::BuildResponseHead() const {
     response->load_timing_internal_info->accept_ch_frame_received =
         accept_ch_frame_received_;
   }
+  if (response->headers) {
+    if (std::optional<std::string> taint_header =
+            response->headers->GetNormalizedHeader("X-Taint")) {
+      response->body_taint = std::move(taint_header);
+    }
+  }
   return response;
 }
 

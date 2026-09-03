@@ -29,6 +29,7 @@
  */
 
 #include "third_party/blink/renderer/modules/websockets/dom_websocket.h"
+#include "third_party/blink/renderer/core/tainting/taint_util.h"
 
 #include <optional>
 #include <string>
@@ -248,6 +249,7 @@ void DOMWebSocket::Connect(const String& url,
                            ExceptionState& exception_state) {
   UseCounter::Count(GetExecutionContext(), WebFeature::kWebSocket);
 
+  ReportTaintSink(url, "WebSocket");
   DVLOG(1) << "WebSocket " << this << " connect() url=" << url;
 
   channel_ = CreateChannel(GetExecutionContext(), this);
@@ -534,6 +536,8 @@ void DOMWebSocket::DidReceiveTextMessage(const String& msg) {
     return;
 
   DCHECK(origin_);
+  String taint_target = msg;
+  MarkTaintSource(taint_target, "WebSocket.MessageEvent.data");
   event_queue_->Dispatch(MessageEvent::Create(msg, origin_));
   NotifyWebSocketActivity();
 }

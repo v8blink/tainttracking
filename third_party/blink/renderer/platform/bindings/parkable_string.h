@@ -104,6 +104,9 @@ class PLATFORM_EXPORT ParkableStringImpl
   // returned value (or a copy of it) is alive.
   const String& ToString();
 
+  const StringTaint& Taint() const;
+  void SetTaint(const StringTaint& taint);
+
   // See the matching String methods.
   bool is_8bit() const {
     if (!may_be_parked())

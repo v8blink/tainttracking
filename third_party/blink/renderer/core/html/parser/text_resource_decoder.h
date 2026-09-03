@@ -26,6 +26,7 @@
 #include <memory>
 
 #include "base/memory/ptr_util.h"
+#include "taint/Taint.h"
 #include "third_party/blink/renderer/core/core_export.h"
 #include "third_party/blink/renderer/core/html/parser/html_meta_charset_parser.h"
 #include "third_party/blink/renderer/platform/loader/fetch/body_text_decoder.h"
@@ -80,6 +81,7 @@ class CORE_EXPORT TextResourceDecoder : public BodyTextDecoder {
                 String* auto_detected_charset = nullptr) {
     return Decode(base::as_chars(data), auto_detected_charset);
   }
+  String Decode(base::span<const uint8_t> data, const StringTaint& byte_taint);
   String Flush() override;
   WebEncodingData GetEncodingData() const override;
 
@@ -119,6 +121,7 @@ class CORE_EXPORT TextResourceDecoder : public BodyTextDecoder {
   MetaCharsetDisposition meta_charset_disposition_ =
       MetaCharsetDisposition::kUnknown;
   std::unique_ptr<HTMLMetaCharsetParser> charset_parser_;
+  wtf_size_t decoded_taint_offset_ = 0;
 };
 
 }  // namespace blink

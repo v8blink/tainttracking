@@ -22,6 +22,7 @@
  */
 
 #include "third_party/blink/renderer/core/xmlhttprequest/xml_http_request.h"
+#include "third_party/blink/renderer/core/tainting/taint_util.h"
 
 #include <memory>
 #include <optional>
@@ -310,7 +311,10 @@ String XMLHttpRequest::responseText(ExceptionState& exception_state) {
   }
   if (error_ || (state_ != kLoading && state_ != kDone))
     return String();
-  return response_text_.ToString();
+  String result = response_text_.ToString();
+  MarkTaintSource(result, "XMLHttpRequest.response");
+  MarkTaintOperation(result, "XMLHttpRequest.responseText");
+  return result;
 }
 
 void XMLHttpRequest::InitResponseDocument() {
@@ -380,8 +384,9 @@ v8::Local<v8::Value> XMLHttpRequest::ResponseJSON(ScriptState* script_state) {
   // Catch syntax error. Swallows an exception (when thrown) as the
   // spec says. https://xhr.spec.whatwg.org/#response-body
   v8::TryCatch try_catch(script_state->GetIsolate());
-  v8::Local<v8::Value> json =
-      FromJSONString(script_state, response_text_.ToString());
+  String json_source = response_text_.ToString();
+  MarkTaintSource(json_source, "XMLHttpRequest.response(json)");
+  v8::Local<v8::Value> json = FromJSONString(script_state, json_source);
   if (try_catch.HasCaught()) {
     return v8::Null(script_state->GetIsolate());
   }
@@ -618,6 +623,8 @@ void XMLHttpRequest::open(const AtomicString& method,
   if (!GetExecutionContext())
     return;
 
+  ReportTaintSink(url_string, "XMLHttpRequest.open(url)");
+
   KURL url(GetExecutionContext()->CompleteURL(url_string));
   if (!ValidateOpenArguments(method, url, exception_state))
     return;
@@ -633,6 +640,12 @@ void XMLHttpRequest::open(const AtomicString& method,
                           ExceptionState& exception_state) {
   if (!GetExecutionContext())
     return;
+
+  ReportTaintSink(url_string, "XMLHttpRequest.open(url)");
+  if (!username.IsNull())
+    ReportTaintSink(username, "XMLHttpRequest.open(username)");
+  if (!password.IsNull())
+    ReportTaintSink(password, "XMLHttpRequest.open(password)");
 
   KURL url(GetExecutionContext()->CompleteURL(url_string));
   if (!ValidateOpenArguments(method, url, exception_state))
@@ -833,6 +846,7 @@ void XMLHttpRequest::send(Document* document, ExceptionState& exception_state) {
 
     String body = CreateMarkup(document);
 
+    ReportTaintSink(body, "XMLHttpRequest.send");
     http_body = EncodedFormData::Create(
         Utf8Encoding().Encode(body, UnencodableHandling::kNone));
   }
@@ -843,6 +857,8 @@ void XMLHttpRequest::send(Document* document, ExceptionState& exception_state) {
 void XMLHttpRequest::send(const String& body, ExceptionState& exception_state) {
   if (!InitSend(exception_state))
     return;
+
+  ReportTaintSink(body, "XMLHttpRequest.send");
 
   scoped_refptr<EncodedFormData> http_body;
 
@@ -1382,6 +1398,10 @@ void XMLHttpRequest::setRequestHeader(const AtomicString& name,
                                       "The object's state must be OPENED.");
     return;
   }
+  String header_name = name;
+  String header_value = value;
+  ReportTaintSink(header_name, "XMLHttpRequest.setRequestHeader(name)");
+  ReportTaintSink(header_value, "XMLHttpRequest.setRequestHeader(value)");
 
   // "3. Normalize |value|."
   const String normalized_value = FetchUtils::NormalizeHeaderValue(value);

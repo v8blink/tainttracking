@@ -237,7 +237,13 @@ class CORE_EXPORT HTMLTokenizer {
   inline void BufferCharacter(UChar character) {
     DCHECK_NE(character, kEndOfFileMarker);
     token_.EnsureIsCharacterToken();
-    token_.AppendToCharacter(character);
+    token_.AppendToCharacter(character, input_stream_preprocessor_.CurrentTaint());
+  }
+
+  inline void BufferCharacter(UChar character, const SafeStringTaint& taint) {
+    DCHECK_NE(character, kEndOfFileMarker);
+    token_.EnsureIsCharacterToken();
+    token_.AppendToCharacter(character, taint);
   }
 
   inline bool EmitAndResumeInDataState(SegmentedString& source) {

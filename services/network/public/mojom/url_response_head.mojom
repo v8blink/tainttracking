@@ -325,4 +325,6 @@ struct URLResponseHead {
   // True if HTTP authentication was used to fetch this response. This will not
   // be set for proxy auth.
   bool did_use_server_http_auth = false;
+
+  string? body_taint;
 };

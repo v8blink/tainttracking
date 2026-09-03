@@ -25,6 +25,7 @@
  */
 
 #include "third_party/blink/renderer/core/dom/tree_scope.h"
+#include "third_party/blink/renderer/core/tainting/taint_util.h"
 
 #include "third_party/blink/renderer/bindings/core/v8/v8_observable_array_css_style_sheet.h"
 #include "third_party/blink/renderer/bindings/core/v8/v8_throw_dom_exception.h"
@@ -121,6 +122,8 @@ void TreeScope::ClearScopedStyleResolver() {
 Element* TreeScope::getElementById(const AtomicString& element_id) const {
   if (element_id.empty())
     return nullptr;
+  String taint_target = element_id;
+  MarkTaintSource(taint_target, "document.getElementById");
   if (!elements_by_id_)
     return nullptr;
   return elements_by_id_->GetElementById(element_id, *this);

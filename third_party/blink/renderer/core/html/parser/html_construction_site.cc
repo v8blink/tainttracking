@@ -44,6 +44,7 @@
 #include "third_party/blink/renderer/core/dom/shadow_root.h"
 #include "third_party/blink/renderer/core/dom/template_content_document_fragment.h"
 #include "third_party/blink/renderer/core/dom/text.h"
+#include "third_party/blink/renderer/core/tainting/taint_util.h"
 #include "third_party/blink/renderer/core/dom/throw_on_dynamic_markup_insertion_count_incrementer.h"
 #include "third_party/blink/renderer/core/dom/tree_scope.h"
 #include "third_party/blink/renderer/core/execution_context/agent.h"
@@ -392,9 +393,13 @@ void HTMLConstructionSite::FlushPendingText() {
     HTMLConstructionSiteTask task(HTMLConstructionSiteTask::kInsertText);
     task.parent = pending_text_.parent;
     task.next_child = pending_text_.next_child;
-    task.child = Text::Create(
-        task.parent->GetDocument(),
-        TryCanonicalizeString(string, pending_text_.whitespace_mode));
+    String text = TryCanonicalizeString(string, pending_text_.whitespace_mode);
+    if (task.parent->GetDocument().IsXHRDocument() && text.Impl() &&
+        text.length()) {
+      MarkTaintSource(text, "XMLHttpRequest.response");
+      MarkTaintOperation(text, "XMLHttpRequest.responseXML");
+    }
+    task.child = Text::Create(task.parent->GetDocument(), std::move(text));
     QueueTask(task, false);
     pending_text_.Discard();
     return;
@@ -438,6 +443,11 @@ void HTMLConstructionSite::FlushPendingText() {
     HTMLConstructionSiteTask task(HTMLConstructionSiteTask::kInsertText);
     task.parent = pending_text_.parent;
     task.next_child = pending_text_.next_child;
+    if (task.parent->GetDocument().IsXHRDocument() && substring.Impl() &&
+        substring.length()) {
+      MarkTaintSource(substring, "XMLHttpRequest.response");
+      MarkTaintOperation(substring, "XMLHttpRequest.responseXML");
+    }
     task.child = Text::Create(task.parent->GetDocument(), std::move(substring));
     QueueTask(task, false);
     DCHECK_EQ(To<Text>(task.child.Get())->length(),

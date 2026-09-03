@@ -1817,13 +1817,19 @@ void InlineNode::ShapeTextForFirstLineIfNeeded(InlineNodeData* data) const {
     // ::first-line, and does not work when the base style has text-transform
     // and ::first-line has different text-transform.
     if (RuntimeEnabledFeatures::FirstLineTextTransformEnabled()) {
+      String taint_src = text_content;
       text_content =
           first_line_style.ApplyTextTransform(text_content, ' ', &offset_map);
+      if (taint_src.IsTainted())
+        text_content.SetTaint(taint_src.Taint());
       if (text_content != data->text_content) {
         needs_reshape = true;
       }
     } else {
+      String taint_src2 = text_content;
       text_content = first_line_style.ApplyTextTransform(text_content);
+      if (taint_src2.IsTainted())
+        text_content.SetTaint(taint_src2.Taint());
       if (text_content != data->text_content) {
         // TODO(kojii): When text-transform changes the length, we need to
         // adjust offset in InlineItem, or re-collect inlines. Other classes

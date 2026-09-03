@@ -11,4 +11,6 @@ blink_modules_sources("eventsource") {
     "event_source_parser.cc",
     "event_source_parser.h",
   ]
+
+  deps = [ "//taint" ]
 }

@@ -65,7 +65,7 @@ component("url") {
 
   defines = [ "IS_URL_IMPL" ]
 
-  deps = []
+  deps = [ "//taint" ]
 
   public_deps = [
     "//base",

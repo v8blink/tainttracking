@@ -58,6 +58,7 @@ class CORE_EXPORT DecodedDataDocumentParser : public DocumentParser {
   bool needs_decoder_;
   bool meta_charset_trace_event_emitted_ = false;
   std::unique_ptr<TextResourceDecoder> decoder_;
+  wtf_size_t e2e_taint_offset_ = 0;
 };
 
 }  // namespace blink

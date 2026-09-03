@@ -23,6 +23,7 @@
  */
 
 #include "third_party/blink/renderer/core/script/script_loader.h"
+#include "third_party/blink/renderer/core/tainting/taint_util.h"
 
 #include <variant>
 
@@ -546,7 +547,8 @@ PendingScript* ScriptLoader::PrepareScript(
   //     script is not executed.
   // - Step 5: Let source text be the element’s [[ScriptText]] internal slot
   //     value.
-  const String source_text = GetScriptText();
+  String source_text = GetScriptText();
+  MarkTaintOperation(source_text, "script.text");
 
   // <spec step="6">If el has no src attribute, and source text is the empty
   // string, then return.</spec>

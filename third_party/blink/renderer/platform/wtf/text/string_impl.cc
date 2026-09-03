@@ -62,6 +62,7 @@ struct SameSizeAsStringImpl {
   unsigned int ref_count_change_count;
 #endif
   int fields[3];
+  void* taint;
 };
 
 ASSERT_SIZE(StringImpl, SameSizeAsStringImpl);
@@ -393,10 +394,14 @@ scoped_refptr<StringImpl> StringImpl::Substring(size_type start,
       return const_cast<StringImpl*>(this);
     length = max_length;
   }
+  scoped_refptr<StringImpl> result;
   if (Is8Bit())
-    return Create(Span8().subspan(start, length));
-
-  return Create(Span16().subspan(start, length));
+    result = Create(Span8().subspan(start, length));
+  else
+    result = Create(Span16().subspan(start, length));
+  if (taint_.hasTaint() && result->length())
+    result->SetTaint(taint_.safeSubTaint(start, start + length));
+  return result;
 }
 
 UChar32 StringImpl::CodePointAtOrZero(size_type i) {
@@ -434,7 +439,13 @@ scoped_refptr<StringImpl> StringImpl::ToAsciiLower() {
   if (ContainsNoAsciiUpper()) {
     return this;
   }
-  return ConvertAsciiCase(*this, LowerConverter(), StringImplAllocator());
+  scoped_refptr<StringImpl> result =
+      ConvertAsciiCase(*this, LowerConverter(), StringImplAllocator());
+  if (taint_.hasTaint() && result.get() != this && result->length()) {
+    result->SetTaint(taint_);
+    result->Taint().extend(TaintOperation("ToAsciiLower"));
+  }
+  return result;
 }
 
 scoped_refptr<StringImpl> StringImpl::ToAsciiUpper() {
@@ -442,7 +453,13 @@ scoped_refptr<StringImpl> StringImpl::ToAsciiUpper() {
                       [](auto chars) { return ContainsNoAsciiLower(chars); })) {
     return this;
   }
-  return ConvertAsciiCase(*this, UpperConverter(), StringImplAllocator());
+  scoped_refptr<StringImpl> result =
+      ConvertAsciiCase(*this, UpperConverter(), StringImplAllocator());
+  if (taint_.hasTaint() && result.get() != this && result->length()) {
+    result->SetTaint(taint_);
+    result->Taint().extend(TaintOperation("ToAsciiUpper"));
+  }
+  return result;
 }
 
 scoped_refptr<StringImpl> StringImpl::Fill(UChar character) {
@@ -486,7 +503,8 @@ scoped_refptr<StringImpl> StringImpl::FoldCase() {
 
   const bool is_ascii = ContainsOnlyAsciiOrEmpty();
 
-  return VisitCharacters(*this, [&](auto chars) -> scoped_refptr<StringImpl> {
+  scoped_refptr<StringImpl> result =
+      VisitCharacters(*this, [&](auto chars) -> scoped_refptr<StringImpl> {
     if (is_ascii) {
       // Faster implementation for cases where all the characters are ASCII.
       using CharType = typename decltype(chars)::value_type;
@@ -510,6 +528,11 @@ scoped_refptr<StringImpl> StringImpl::FoldCase() {
       return fold_case_16bit_slow(chars, this);
     }
   });
+  if (taint_.hasTaint() && result.get() != this && result->length()) {
+    result->SetTaint(taint_);
+    result->Taint().extend(TaintOperation("FoldCase"));
+  }
+  return result;
 }
 
 template <class UCharPredicate>
@@ -617,7 +640,7 @@ scoped_refptr<StringImpl> StringImpl::Remove(size_type start,
   length_to_remove = std::min(length_ - start, length_to_remove);
   size_type removed_end = start + length_to_remove;
 
-  return VisitCharacters(
+  scoped_refptr<StringImpl> result = VisitCharacters(
       *this, [start, length_to_remove, removed_end](auto chars) {
         using CharType = decltype(chars)::value_type;
         StringBuffer<CharType> buffer(
@@ -627,6 +650,12 @@ scoped_refptr<StringImpl> StringImpl::Remove(size_type start,
         CopyChars(after, chars.subspan(removed_end));
         return buffer.Release();
       });
+  if (taint_.hasTaint() && result.get() != this && result->length()) {
+    SafeStringTaint new_taint(taint_);
+    new_taint.replace(start, removed_end, 0, EmptyTaint);
+    result->SetTaint(new_taint);
+  }
+  return result;
 }
 
 template <typename CharType, class UCharPredicate>
@@ -1067,6 +1096,8 @@ scoped_refptr<StringImpl> StringImpl::Replace(UChar old_c, UChar new_c) {
       scoped_refptr<StringImpl> new_impl = CreateUninitialized(length_, data8);
       CopyAndReplace(data8, Span8(), static_cast<LChar>(old_c),
                      static_cast<LChar>(new_c));
+      if (taint_.hasTaint())
+        new_impl->SetTaint(taint_);
       return new_impl;
     }
 
@@ -1075,12 +1106,16 @@ scoped_refptr<StringImpl> StringImpl::Replace(UChar old_c, UChar new_c) {
     base::span<UChar> data16;
     scoped_refptr<StringImpl> new_impl = CreateUninitialized(length_, data16);
     CopyAndReplace(data16, Span8(), old_c, new_c);
+    if (taint_.hasTaint())
+      new_impl->SetTaint(taint_);
     return new_impl;
   }
 
   base::span<UChar> data16;
   scoped_refptr<StringImpl> new_impl = CreateUninitialized(length_, data16);
   CopyAndReplace(data16, Span16(), old_c, new_c);
+  if (taint_.hasTaint())
+    new_impl->SetTaint(taint_);
   return new_impl;
 }
 
@@ -1110,6 +1145,12 @@ scoped_refptr<StringImpl> StringImpl::Replace(size_type position,
       data8_replaced.copy_from(string.Span8());
     }
     data8.copy_from(source8.subspan(position + length_to_replace));
+    if ((taint_.hasTaint() || string.isTainted()) && new_impl->length()) {
+      SafeStringTaint new_taint(taint_);
+      new_taint.replace(position, position + length_to_replace, string.length(),
+                        string.Taint());
+      new_impl->SetTaint(new_taint);
+    }
     return new_impl;
   }
 
@@ -1123,6 +1164,12 @@ scoped_refptr<StringImpl> StringImpl::Replace(size_type position,
     CopyStringFragment(string, data16_replaced);
   }
   CopyStringFragment(StringView(*this, position + length_to_replace), data16);
+  if ((taint_.hasTaint() || string.isTainted()) && new_impl->length()) {
+    SafeStringTaint new_taint(taint_);
+    new_taint.replace(position, position + length_to_replace, string.length(),
+                      string.Taint());
+    new_impl->SetTaint(new_taint);
+  }
   return new_impl;
 }
 
@@ -1152,6 +1199,8 @@ scoped_refptr<StringImpl> StringImpl::Replace(UChar pattern,
     base::span<LChar> data;
     scoped_refptr<StringImpl> new_impl = CreateUninitialized(new_size, data);
     DoReplace(Span8(), pattern, replacement.Span8(), data);
+    if (taint_.hasTaint() && new_impl->length())
+      new_impl->SetTaint(taint_);
     return new_impl;
   }
 
@@ -1166,6 +1215,8 @@ scoped_refptr<StringImpl> StringImpl::Replace(UChar pattern,
       DoReplace(Span16(), pattern, replacement.Span16(), data);
     }
   }
+  if (taint_.hasTaint() && new_impl->length())
+    new_impl->SetTaint(taint_);
   return new_impl;
 }
 
@@ -1226,6 +1277,8 @@ scoped_refptr<StringImpl> StringImpl::Replace(const StringView& pattern,
     base::span<LChar> data;
     scoped_refptr<StringImpl> new_impl = CreateUninitialized(new_size, data);
     DoReplace(pattern, replacement, data);
+    if (taint_.hasTaint() && new_impl->length())
+      new_impl->SetTaint(taint_);
     return new_impl;
   }
 
@@ -1233,6 +1286,8 @@ scoped_refptr<StringImpl> StringImpl::Replace(const StringView& pattern,
   base::span<UChar> data;
   scoped_refptr<StringImpl> new_impl = CreateUninitialized(new_size, data);
   DoReplace(pattern, replacement, data);
+  if (taint_.hasTaint() && new_impl->length())
+    new_impl->SetTaint(taint_);
   return new_impl;
 }
 
@@ -1256,8 +1311,13 @@ void StringImpl::DoReplace(const StringView& pattern,
 }
 
 scoped_refptr<StringImpl> StringImpl::UpconvertedString() {
-  if (Is8Bit())
-    return String::Make16BitFrom8BitSource(Span8()).ReleaseImpl();
+  if (Is8Bit()) {
+    scoped_refptr<StringImpl> result =
+        String::Make16BitFrom8BitSource(Span8()).ReleaseImpl();
+    if (taint_.hasTaint() && result && result->length())
+      result->SetTaint(taint_);
+    return result;
+  }
   return this;
 }
 

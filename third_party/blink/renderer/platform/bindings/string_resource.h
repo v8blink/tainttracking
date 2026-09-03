@@ -12,6 +12,7 @@
 #include "third_party/blink/renderer/platform/platform_export.h"
 #include "third_party/blink/renderer/platform/wtf/allocator/allocator.h"
 #include "third_party/blink/renderer/platform/wtf/text/atomic_string.h"
+#include "third_party/blink/renderer/platform/wtf/text/string_impl.h"
 #include "v8/include/v8.h"
 
 namespace blink {
@@ -126,6 +127,16 @@ class StringResourceBase {
     return atomic_string_.Impl();
   }
 
+  const ::StringTaint* TaintPtrFromString() const {
+    StringImpl* impl = nullptr;
+    if (!plain_string_.IsNull()) {
+      impl = plain_string_.Impl();
+    } else if (!atomic_string_.IsNull()) {
+      impl = atomic_string_.Impl();
+    }
+    return impl ? &impl->Taint() : nullptr;
+  }
+
   const ParkableString& GetParkableString() const { return parkable_string_; }
 
   // Helper functions for derived constructors.
@@ -191,6 +202,10 @@ class StringResource16Base : public StringResourceBase,
   void EstimateSharedMemoryUsage(
       SharedMemoryUsageRecorder* recorder) const override {
     return StringResourceBase::EstimateSharedMemoryUsage(recorder);
+  }
+
+  const ::StringTaint* GetTaintPtr() const override {
+    return TaintPtrFromString();
   }
 };
 
@@ -261,6 +276,10 @@ class StringResource8Base : public StringResourceBase,
   void EstimateSharedMemoryUsage(
       SharedMemoryUsageRecorder* recorder) const override {
     return StringResourceBase::EstimateSharedMemoryUsage(recorder);
+  }
+
+  const ::StringTaint* GetTaintPtr() const override {
+    return TaintPtrFromString();
   }
 };
 

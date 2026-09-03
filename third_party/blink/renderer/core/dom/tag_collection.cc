@@ -34,10 +34,13 @@ TagCollection::TagCollection(ContainerNode& root_node,
 TagCollection::~TagCollection() = default;
 
 bool TagCollection::ElementMatches(const Element& test_node) const {
-  if (qualified_name_ == g_star_atom)
-    return true;
-
-  return qualified_name_ == test_node.TagQName().ToString();
+  bool matches = qualified_name_ == g_star_atom ||
+                 qualified_name_ == test_node.TagQName().ToString();
+  if (matches) {
+    const_cast<Element&>(test_node)
+        .TaintSelectorOperation("document.getElementsByTagName");
+  }
+  return matches;
 }
 
 TagCollectionNS::TagCollectionNS(ContainerNode& root_node,
@@ -58,8 +61,13 @@ bool TagCollectionNS::ElementMatches(const Element& test_node) const {
   if (local_name_ != g_star_atom && local_name_ != test_node.localName())
     return false;
 
-  return namespace_uri_ == g_star_atom ||
-         namespace_uri_ == test_node.namespaceURI();
+  bool matches = namespace_uri_ == g_star_atom ||
+                 namespace_uri_ == test_node.namespaceURI();
+  if (matches) {
+    const_cast<Element&>(test_node)
+        .TaintSelectorOperation("document.getElementsByTagName");
+  }
+  return matches;
 }
 
 }  // namespace blink

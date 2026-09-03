@@ -13,9 +13,11 @@
 #include "third_party/blink/renderer/core/execution_context/agent.h"
 #include "third_party/blink/renderer/core/execution_context/execution_context.h"
 #include "third_party/blink/renderer/core/messaging/message_port.h"
+#include "third_party/blink/renderer/core/tainting/taint_util.h"
 #include "third_party/blink/renderer/platform/bindings/exception_state.h"
 #include "third_party/blink/renderer/platform/wtf/functional.h"
 #include "third_party/blink/renderer/platform/wtf/text/base64.h"
+#include "third_party/blink/renderer/platform/wtf/text/string_impl.h"
 #include "third_party/blink/renderer/platform/wtf/text/string_utf8_adaptor.h"
 
 namespace blink {
@@ -34,7 +36,12 @@ String UniversalGlobalScope::btoa(const String& string_to_encode,
     return String();
   }
 
-  return Base64Encode(base::as_byte_span(string_to_encode.Latin1()));
+  String result = Base64Encode(base::as_byte_span(string_to_encode.Latin1()));
+  if (string_to_encode.IsTainted() && result.Impl() && result.length()) {
+    result.Impl()->Taint().concat(string_to_encode.Impl()->Taint(), 0);
+    result.Impl()->Taint().extend(GetTaintOperation("btoa"));
+  }
+  return result;
 }
 
 String UniversalGlobalScope::atob(const String& encoded_string,
@@ -58,7 +65,12 @@ String UniversalGlobalScope::atob(const String& encoded_string,
     return String();
   }
 
-  return String(out);
+  String result(out);
+  if (encoded_string.IsTainted() && result.Impl() && result.length()) {
+    result.Impl()->Taint().concat(encoded_string.Impl()->Taint(), 0);
+    result.Impl()->Taint().extend(GetTaintOperation("atob"));
+  }
+  return result;
 }
 
 void UniversalGlobalScope::queueMicrotask(V8VoidFunction* callback) {

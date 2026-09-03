@@ -32,6 +32,7 @@
 #include "third_party/blink/renderer/bindings/core/v8/v8_binding_for_core.h"
 #include "third_party/blink/renderer/core/dom/document.h"
 #include "third_party/blink/renderer/core/frame/csp/content_security_policy.h"
+#include "third_party/blink/renderer/core/tainting/taint_util.h"
 #include "third_party/blink/renderer/core/frame/dom_window.h"
 #include "third_party/blink/renderer/core/frame/local_dom_window.h"
 #include "third_party/blink/renderer/core/frame/local_frame.h"
@@ -94,35 +95,51 @@ inline const KURL& Location::Url() const {
 }
 
 String Location::href() const {
-  return Url().StrippedForUseAsHref();
+  String result = Url().StrippedForUseAsHref();
+  MarkTaintSource(result, "location.href");
+  return result;
 }
 
 String Location::protocol() const {
-  return DOMURLUtilsReadOnly::protocol(Url());
+  String result = DOMURLUtilsReadOnly::protocol(Url());
+  MarkTaintSource(result, "location.protocol");
+  return result;
 }
 
 String Location::host() const {
-  return DOMURLUtilsReadOnly::host(Url());
+  String result = DOMURLUtilsReadOnly::host(Url());
+  MarkTaintSource(result, "location.host");
+  return result;
 }
 
 String Location::hostname() const {
-  return DOMURLUtilsReadOnly::hostname(Url());
+  String result = DOMURLUtilsReadOnly::hostname(Url());
+  MarkTaintSource(result, "location.hostname");
+  return result;
 }
 
 String Location::port() const {
-  return DOMURLUtilsReadOnly::port(Url());
+  String result = DOMURLUtilsReadOnly::port(Url());
+  MarkTaintSource(result, "location.port");
+  return result;
 }
 
 String Location::pathname() const {
-  return DOMURLUtilsReadOnly::pathname(Url());
+  String result = DOMURLUtilsReadOnly::pathname(Url());
+  MarkTaintSource(result, "location.pathname");
+  return result;
 }
 
 String Location::search() const {
-  return DOMURLUtilsReadOnly::search(Url());
+  String result = DOMURLUtilsReadOnly::search(Url());
+  MarkTaintSource(result, "location.search");
+  return result;
 }
 
 String Location::origin() const {
-  return DOMURLUtilsReadOnly::origin(Url());
+  String result = DOMURLUtilsReadOnly::origin(Url());
+  MarkTaintSource(result, "location.origin");
+  return result;
 }
 
 DOMStringList* Location::ancestorOrigins() {
@@ -151,7 +168,9 @@ String Location::toString() const {
 }
 
 String Location::hash() const {
-  return DOMURLUtilsReadOnly::hash(Url());
+  String result = DOMURLUtilsReadOnly::hash(Url());
+  MarkTaintSource(result, "location.hash");
+  return result;
 }
 
 void Location::setHref(v8::Isolate* isolate,
@@ -278,6 +297,8 @@ void Location::SetLocation(const String& url,
                            SetLocationPolicy set_location_policy) {
   if (!IsAttached())
     return;
+
+  ReportTaintSink(url, "location.href");
 
   if (!incumbent_window->GetFrame())
     return;

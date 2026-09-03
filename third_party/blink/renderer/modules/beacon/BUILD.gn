@@ -9,4 +9,6 @@ blink_modules_sources("beacon") {
     "navigator_beacon.cc",
     "navigator_beacon.h",
   ]
+
+  deps = [ "//taint" ]
 }

@@ -434,6 +434,18 @@ String TextResourceDecoder::Decode(base::span<const char> data,
   return result;
 }
 
+String TextResourceDecoder::Decode(base::span<const uint8_t> data,
+                                   const StringTaint& byte_taint) {
+  String result = Decode(base::as_chars(data), nullptr);
+  if (byte_taint.hasTaint() && result.Impl()) {
+    SafeStringTaint chunk_taint = byte_taint.safeSubTaint(
+        decoded_taint_offset_, decoded_taint_offset_ + result.length());
+    result.Impl()->SetTaint(chunk_taint);
+  }
+  decoded_taint_offset_ += result.length();
+  return result;
+}
+
 String TextResourceDecoder::Flush() {
   // If we can not identify the encoding even after a document is completely
   // loaded, we need to detect the encoding if other conditions for

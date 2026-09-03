@@ -59,6 +59,8 @@ class InputStreamPreprocessor {
     return ProcessNextInputCharacter(source, cc);
   }
 
+  const SafeStringTaint& CurrentTaint() const { return current_taint_; }
+
   // Returns whether there are more characters in |source| after advancing.
   ALWAYS_INLINE bool Advance(SegmentedString& source, UChar& cc) {
     cc = source.AdvanceAndUpdateLineNumber();
@@ -113,6 +115,7 @@ class InputStreamPreprocessor {
  private:
   ALWAYS_INLINE bool ProcessNextInputCharacter(SegmentedString& source,
                                                UChar& cc) {
+    current_taint_ = source.CurrentTaint();
     // Every branch in this function is expensive, so we have a
     // fast-reject branch for characters that don't require special
     // handling. Please run the parser benchmark whenever you touch
@@ -168,6 +171,7 @@ class InputStreamPreprocessor {
 
   Tokenizer* tokenizer_;
   bool skip_next_new_line_ = false;
+  SafeStringTaint current_taint_;
 };
 
 }  // namespace blink

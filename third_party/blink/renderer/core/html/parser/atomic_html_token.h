@@ -236,9 +236,11 @@ class CORE_EXPORT AtomicHTMLToken {
       case HTMLToken::kCharacter:
       case HTMLToken::kComment:
         data_ = token.Data().AsString();
+        data_.SetTaint(token.Data().Taint());
         break;
       case HTMLToken::kProcessingInstruction:
         data_ = token.Data().AsString();
+        data_.SetTaint(token.Data().Taint());
         processing_instruction_target_ =
             token.GetProcessingInstructionTarget().AsString();
         break;
@@ -380,6 +382,8 @@ void AtomicHTMLToken::InitializeAttributes(
     AtomicString value(attribute.GetValue());
     if (value.IsNull()) {
       value = g_empty_atom;
+    } else if (attribute.ValueBuffer().Taint().hasTaint() && value.Impl()) {
+      value.Impl()->SetTaint(attribute.ValueBuffer().Taint());
     }
     attributes_.UncheckedAppend(Attribute(std::move(name), std::move(value)));
   }

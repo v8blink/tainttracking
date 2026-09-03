@@ -935,6 +935,9 @@ void KURL::Init(const KURL& base,
     string_ = AtomicString(relative.SharedImpl());
   } else {
     string_ = AtomicString(output_url_span);
+    if (relative.isTainted() && string_.Impl()) {
+      string_.Impl()->SetTaint(relative.Taint());
+    }
   }
 
   InitProtocolMetadata();
@@ -1037,6 +1040,10 @@ void KURL::ReplaceComponents(const url::Replacements<CHAR>& replacements,
   url::Parsed new_parsed;
 
   bool replacements_valid;
+  SafeStringTaint old_taint;
+  if (string_.Impl() && string_.Impl()->isTainted()) {
+    old_taint = string_.Impl()->Taint();
+  }
   {
     StringUtf8Adaptor utf8(string_);
     replacements_valid =
@@ -1048,6 +1055,9 @@ void KURL::ReplaceComponents(const url::Replacements<CHAR>& replacements,
     is_valid_ = replacements_valid;
     parsed_ = new_parsed;
     string_ = AtomicString(base::as_byte_span(output.view()));
+    if (old_taint.hasTaint() && string_.Impl()) {
+      string_.Impl()->SetTaint(old_taint);
+    }
     InitProtocolMetadata();
     AssertStringSpecIsAscii();
   }

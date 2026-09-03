@@ -26,6 +26,7 @@
 
 #include "third_party/blink/renderer/core/url/dom_url_utils_read_only.h"
 
+#include "third_party/blink/renderer/core/tainting/taint_util.h"
 #include "third_party/blink/renderer/platform/weborigin/known_ports.h"
 #include "third_party/blink/renderer/platform/weborigin/security_origin.h"
 
@@ -35,7 +36,15 @@ String DOMURLUtilsReadOnly::href() {
   const KURL& kurl = Url();
   if (kurl.IsNull())
     return Input();
-  return kurl.GetString();
+  String result = kurl.GetString();
+  MarkTaintOperation(result, "URL");
+  return result;
+}
+
+String DOMURLUtilsReadOnly::pathname(const KURL& url) {
+  String result = url.GetPath().ToString();
+  MarkTaintOperation(result, "URL.pathname");
+  return result;
 }
 
 String DOMURLUtilsReadOnly::origin(const KURL& kurl) {
@@ -60,11 +69,15 @@ String DOMURLUtilsReadOnly::port(const KURL& kurl) {
 }
 
 String DOMURLUtilsReadOnly::search(const KURL& kurl) {
-  return kurl.QueryWithLeadingQuestionMark().ToString();
+  String result = kurl.QueryWithLeadingQuestionMark().ToString();
+  MarkTaintOperation(result, "URL.search");
+  return result;
 }
 
 String DOMURLUtilsReadOnly::hash(const KURL& kurl) {
-  return kurl.FragmentIdentifierWithLeadingNumberSign().ToString();
+  String result = kurl.FragmentIdentifierWithLeadingNumberSign().ToString();
+  MarkTaintOperation(result, "URL.hash");
+  return result;
 }
 
 }  // namespace blink

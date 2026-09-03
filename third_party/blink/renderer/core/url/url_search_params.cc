@@ -3,6 +3,7 @@
 // found in the LICENSE file.
 
 #include "third_party/blink/renderer/core/url/url_search_params.h"
+#include "third_party/blink/renderer/core/tainting/taint_util.h"
 
 #include <algorithm>
 #include <utility>
@@ -171,7 +172,9 @@ void URLSearchParams::SetInputWithoutUpdate(const String& query_string) {
 String URLSearchParams::toString() const {
   Vector<char> encoded_data;
   EncodeAsFormData(encoded_data);
-  return String(encoded_data);
+  String result(encoded_data);
+  MarkTaintOperation(result, "URL.parse");
+  return result;
 }
 
 uint32_t URLSearchParams::size() const {
@@ -233,7 +236,9 @@ void URLSearchParams::deleteAllWithNameOrTuple(
 String URLSearchParams::get(const String& name) const {
   for (const auto& param : params_) {
     if (param.first == name) {
-      return param.second;
+      String result = param.second;
+      MarkTaintOperation(result, "URLSearchParams.get", Vector<String>{name});
+      return result;
     }
   }
   return String();
@@ -244,6 +249,8 @@ Vector<String> URLSearchParams::getAll(const String& name) const {
   for (const auto& param : params_) {
     if (param.first == name) {
       result.push_back(param.second);
+      MarkTaintOperation(result.back(), "URLSearchParams.getAll",
+                         Vector<String>{name});
     }
   }
   return result;

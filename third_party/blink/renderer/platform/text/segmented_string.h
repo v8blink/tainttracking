@@ -146,6 +146,14 @@ class PLATFORM_EXPORT SegmentedSubstring {
     return StringView(string_, offset(), len);
   }
 
+  SafeStringTaint CurrentTaint() const {
+    if (string_.Impl() && string_.Impl()->isTainted()) {
+      return string_.Impl()->Taint().safeSubTaint(
+          static_cast<uint32_t>(offset()));
+    }
+    return SafeStringTaint();
+  }
+
   ALWAYS_INLINE int offset() const {
     DCHECK_LE(data_start_, data_.string8_ptr);
     return static_cast<int>(data_.string8_ptr - data_start_) >> !is_8bit_;
@@ -332,6 +340,8 @@ class PLATFORM_EXPORT SegmentedString {
   String ToString() const;
 
   ALWAYS_INLINE UChar CurrentChar() const { return current_char_; }
+
+  SafeStringTaint CurrentTaint() const { return current_string_.CurrentTaint(); }
 
   // The method is moderately slow, comparing to currentLine method.
   OrdinalNumber CurrentColumn() const;

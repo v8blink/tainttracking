@@ -24,6 +24,7 @@
  *
  */
 #include "third_party/blink/renderer/core/scheduler/dom_timer.h"
+#include "third_party/blink/renderer/core/tainting/taint_util.h"
 
 #include <limits>
 
@@ -201,6 +202,7 @@ int DOMTimer::setTimeout(ScriptState* script_state,
       context.IsWorkerGlobalScope() ? trusted_types_names::kWorkerGlobalScope
                                     : trusted_types_names::kWindow,
       trusted_types_names::kSetTimeout, exception_state);
+  ReportTaintSink(handler, "setTimeout");
   if (exception_state.HadException()) {
     return 0;
   }
@@ -250,6 +252,7 @@ int DOMTimer::setInterval(ScriptState* script_state,
       context.IsWorkerGlobalScope() ? trusted_types_names::kWorkerGlobalScope
                                     : trusted_types_names::kWindow,
       trusted_types_names::kSetInterval, exception_state);
+  ReportTaintSink(handler, "setInterval");
   if (exception_state.HadException()) {
     return 0;
   }

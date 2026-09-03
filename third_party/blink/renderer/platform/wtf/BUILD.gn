@@ -131,6 +131,8 @@ component("wtf") {
     "std_lib_extras.h",
     "text/ascii_ctype.h",
     "text/ascii_fast_path.cc",
+    "text/taint_url_escape.cc",
+    "text/taint_url_escape.h",
     "text/ascii_fast_path.h",
     "text/ascii_lower_hash_reader.h",
     "text/atomic_string.cc",
@@ -268,6 +270,7 @@ component("wtf") {
     "//components/crash/core/common:crash_key",
     "//third_party/highway:libhwy",
     "//third_party/icu",
+    "//taint",
   ]
 
   public_deps += [ "//v8:cppgc_headers" ]

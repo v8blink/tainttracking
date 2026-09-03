@@ -73,9 +73,20 @@ inline void AppendCharactersReplacingEntitiesInternal(
            ++entity_index) {
         const auto& entity = entities[entity_index];
         if (c == entity.entity && entity.mask & entity_mask) {
-          result.Append(text.subspan(position_after_last_entity,
-                                     i - position_after_last_entity));
-          result.Append(base::as_byte_span(entity.reference));
+          result.Append(StringView(
+              source, static_cast<wtf_size_t>(position_after_last_entity),
+              static_cast<wtf_size_t>(i - position_after_last_entity)));
+          if (source.isTainted() && source.Taint().at(static_cast<uint32_t>(i))) {
+            String ref_string = String::FromUtf8(entity.reference);
+            if (ref_string.Impl()) {
+              ref_string.Impl()->SetTaint(
+                  StringTaint(source.Taint().atRef(static_cast<uint32_t>(i)),
+                              ref_string.length()));
+            }
+            result.Append(StringView(ref_string));
+          } else {
+            result.Append(base::as_byte_span(entity.reference));
+          }
           position_after_last_entity = i + 1;
           break;
         }
@@ -89,7 +100,8 @@ inline void AppendCharactersReplacingEntitiesInternal(
     result.Append(source);
     return;
   }
-  result.Append(text.subspan(position_after_last_entity));
+  result.Append(
+      StringView(source, static_cast<wtf_size_t>(position_after_last_entity)));
 }
 
 // https://html.spec.whatwg.org/C/#attribute's-serialised-name

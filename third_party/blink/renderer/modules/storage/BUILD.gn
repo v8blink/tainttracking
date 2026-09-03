@@ -25,6 +25,8 @@ blink_modules_sources("storage") {
     "storage_namespace.cc",
     "storage_namespace.h",
   ]
+
+  deps = [ "//taint" ]
 }
 
 source_set("unit_tests") {

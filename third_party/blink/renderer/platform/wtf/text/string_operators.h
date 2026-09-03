@@ -51,6 +51,8 @@ class StringAppend final {
   void WriteTo(base::span<LChar> destination) const;
   void WriteTo(base::span<UChar> destination) const;
 
+  SafeStringTaint Taint() const;
+
  private:
   const StringType1 string1_;
   const StringType2 string2_;
@@ -69,12 +71,18 @@ StringAppend<StringType1, StringType2>::operator String() const {
     scoped_refptr<StringImpl> result =
         StringImpl::CreateUninitialized(computed_length, buffer);
     WriteTo(buffer);
+    SafeStringTaint taint = Taint();
+    if (taint.hasTaint() && result->length())
+      result->SetTaint(taint);
     return result;
   }
   base::span<UChar> buffer;
   scoped_refptr<StringImpl> result =
       StringImpl::CreateUninitialized(computed_length, buffer);
   WriteTo(buffer);
+  SafeStringTaint taint = Taint();
+  if (taint.hasTaint() && result->length())
+    result->SetTaint(taint);
   return result;
 }
 
@@ -113,6 +121,17 @@ void StringAppend<StringType1, StringType2>::WriteTo(
 }
 
 template <typename StringType1, typename StringType2>
+SafeStringTaint StringAppend<StringType1, StringType2>::Taint() const {
+  StringTypeAdapter<StringType1> adapter1(string1_);
+  StringTypeAdapter<StringType2> adapter2(string2_);
+  SafeStringTaint result(adapter1.Taint());
+  SafeStringTaint right(adapter2.Taint());
+  if (right.hasTaint())
+    result.concat(right, static_cast<uint32_t>(adapter1.length()));
+  return result;
+}
+
+template <typename StringType1, typename StringType2>
 size_t StringAppend<StringType1, StringType2>::length() const {
   StringTypeAdapter<StringType1> adapter1(string1_);
   base::CheckedNumeric<size_t> total(adapter1.length());
@@ -139,6 +158,8 @@ class StringTypeAdapter<StringAppend<StringType1, StringType2>> {
   void WriteTo(base::span<UChar> destination) const {
     buffer_.WriteTo(destination);
   }
+
+  SafeStringTaint Taint() const { return buffer_.Taint(); }
 
  private:
   const StringAppend<StringType1, StringType2>& buffer_;

@@ -26,6 +26,7 @@
 #include "third_party/blink/renderer/core/frame/deprecation/deprecation.h"
 #include "third_party/blink/renderer/core/frame/local_dom_window.h"
 #include "third_party/blink/renderer/core/inspector/console_message.h"
+#include "third_party/blink/renderer/core/tainting/taint_util.h"
 #include "third_party/blink/renderer/platform/weborigin/security_origin.h"
 #include "third_party/blink/renderer/platform/wtf/text/wtf_string.h"
 
@@ -69,6 +70,7 @@ Document* DOMParser::parseFromString(const V8UnionStringOrTrustedHTML* str,
   if (exception_state.HadException()) {
     return nullptr;
   }
+  MarkTaintOperation(compliant_str, "DOMParser.ParseFromString");
   return ParseFromStringWithoutTrustedTypes(compliant_str, type);
 }
 

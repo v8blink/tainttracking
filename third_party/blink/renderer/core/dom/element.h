@@ -43,6 +43,7 @@
 #include "third_party/blink/renderer/core/css/resolver/cascade_filter.h"
 #include "third_party/blink/renderer/core/css/style_recalc_change.h"
 #include "third_party/blink/renderer/core/css/style_request.h"
+#include "taint/Taint.h"
 #include "third_party/blink/renderer/core/dom/container_node.h"
 #include "third_party/blink/renderer/core/dom/dom_high_res_time_stamp.h"
 #include "third_party/blink/renderer/core/dom/element_data.h"
@@ -2103,6 +2104,9 @@ class CORE_EXPORT Element : public ContainerNode {
   void ClearSkeletonPseudo();
   PseudoElement& EnsureSkeletonPseudo();
 
+  void TaintSelectorOperation(const char* operation);
+  const TaintList& GetSelectorTaintFlowList() const { return mTaintList; }
+
  protected:
   // Returns true if this element is a native password field or has been
   // identified as a custom password field via CSS or JS heuristics.
@@ -2709,6 +2713,8 @@ class CORE_EXPORT Element : public ContainerNode {
 
   QualifiedName tag_name_;
   Member<ElementData> element_data_;
+
+  TaintList mTaintList;
 
   // A tiny Bloom filter for which attribute names and class names exist
   // in this subtree; saves going to ElementData if the attribute/class

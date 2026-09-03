@@ -275,10 +275,18 @@ scoped_refptr<StringImpl> CaseMap::TryFastToLowerInvariant(StringImpl* source) {
 scoped_refptr<StringImpl> CaseMap::FastToLowerInvariant(StringImpl* source) {
   // Note: This is a hot function in the Dromaeo benchmark.
   DCHECK(source);
-  if (scoped_refptr<StringImpl> result = TryFastToLowerInvariant(source))
-    return result;
-  const char* locale = "";  // "" = root locale.
-  return CaseConvert(CaseMapType::kLower, source, locale);
+  scoped_refptr<StringImpl> result;
+  if (scoped_refptr<StringImpl> fast = TryFastToLowerInvariant(source)) {
+    result = fast;
+  } else {
+    const char* locale = "";  // "" = root locale.
+    result = CaseConvert(CaseMapType::kLower, source, locale);
+  }
+  if (source->isTainted() && result.get() != source && result->length()) {
+    result->SetTaint(source->Taint());
+    result->Taint().extend(TaintOperation("ToLowerInvariant"));
+  }
+  return result;
 }
 
 scoped_refptr<StringImpl> CaseMap::ToLowerInvariant(StringImpl* source,

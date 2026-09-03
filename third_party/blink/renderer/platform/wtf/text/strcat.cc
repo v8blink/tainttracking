@@ -27,6 +27,8 @@ String StrCat(base::span<const StringView> pieces) {
   if (is_8bit) {
     base::span<LChar> buffer;
     auto impl = StringImpl::CreateUninitialized(size, buffer);
+    SafeStringTaint taint;
+    size_t taint_offset = 0;
     for (const auto& view : pieces) {
       base::span<LChar> sub_buffer = buffer.take_first(view.length());
       if (view.Is8Bit()) {
@@ -36,14 +38,21 @@ String StrCat(base::span<const StringView> pieces) {
         DCHECK_LT(UNSAFE_BUFFERS(view[0]), 0x0100);
         sub_buffer[0] = UNSAFE_TODO(view[0]);
       }
+      if (view.isTainted())
+        taint.concat(view.Taint(), static_cast<uint32_t>(taint_offset));
+      taint_offset += view.length();
 #if DCHECK_IS_ON()
       const_cast<StringView&>(view).Clear();
 #endif
     }
+    if (taint.hasTaint() && impl && impl->length())
+      impl->SetTaint(taint);
     return impl;
   }
   base::span<UChar> buffer;
   auto impl = StringImpl::CreateUninitialized(size, buffer);
+  SafeStringTaint taint;
+  size_t taint_offset = 0;
   for (const auto& view : pieces) {
     base::span<UChar> sub_buffer = buffer.take_first(view.length());
     if (view.Is8Bit()) {
@@ -51,10 +60,15 @@ String StrCat(base::span<const StringView> pieces) {
     } else {
       sub_buffer.copy_from(view.Span16());
     }
+    if (view.isTainted())
+      taint.concat(view.Taint(), static_cast<uint32_t>(taint_offset));
+    taint_offset += view.length();
 #if DCHECK_IS_ON()
     const_cast<StringView&>(view).Clear();
 #endif
   }
+  if (taint.hasTaint() && impl && impl->length())
+    impl->SetTaint(taint);
   return impl;
 }
 

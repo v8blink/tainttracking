@@ -1,0 +1,22 @@
+import("//third_party/blink/renderer/core/core.gni")
+
+blink_core_sources("tainting") {
+  sources = [
+    "taint_config.cc",
+    "taint_config.h",
+    "taint_report.cc",
+    "taint_report.h",
+    "taint_util.cc",
+    "taint_util.h",
+    "xpath_generator.cc",
+    "xpath_generator.h",
+  ]
+
+  deps = [
+    "//taint",
+    "//third_party/blink/renderer/bindings/core/v8:generated",
+    "//third_party/blink/renderer/core:all_generators",
+    "//third_party/blink/renderer/platform/wtf",
+    "//v8",
+  ]
+}

@@ -32,6 +32,7 @@
 #include "base/notreached.h"
 #include "base/task/single_thread_task_runner.h"
 #include "base/types/expected.h"
+#include "taint/Taint.h"
 #include "third_party/blink/public/common/features.h"
 #include "third_party/blink/public/mojom/fetch/fetch_api_request.mojom-blink.h"
 #include "third_party/blink/public/mojom/loader/code_cache.mojom-blink.h"
@@ -223,12 +224,27 @@ void ScriptResource::OnMemoryDump(WebMemoryDumpLevelOfDetail level_of_detail,
   }
 }
 
+String ScriptResource::DecodedTextWithTaint(const StringTaint& network_taint) {
+  String text = DecodedText();
+  if (network_taint.hasTaint() && text.Impl()) {
+    StringTaint accumulated;
+    accumulated.concat(network_taint, 0);
+    text.Impl()->SetTaint(accumulated);
+  }
+  return text;
+}
+
 const ParkableString& ScriptResource::GetSourceText() {
   CHECK(IsLoaded());
 
   if (source_text_.IsNull() && Data()) {
     SCOPED_UMA_HISTOGRAM_TIMER_MICROS("Blink.Script.SourceTextTime");
-    String source_text = DecodedText();
+    const AtomicString& taint_header =
+        GetResponse().HttpHeaderField(AtomicString("X-Taint"));
+    StringTaint network_taint =
+        taint_header.empty() ? StringTaint()
+                             : ParseStringTaintForE2E(taint_header.Utf8());
+    String source_text = DecodedTextWithTaint(network_taint);
     if (!(base::FeatureList::IsEnabled(
               blink::features::kJavaScriptSourcePhaseImports) &&
           MIMETypeRegistry::IsWasmMIMEType(GetResponse().HttpContentType()))) {

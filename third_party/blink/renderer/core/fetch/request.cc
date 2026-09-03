@@ -3,6 +3,7 @@
 // found in the LICENSE file.
 
 #include "third_party/blink/renderer/core/fetch/request.h"
+#include "third_party/blink/renderer/core/tainting/taint_util.h"
 
 #include <optional>
 
@@ -319,6 +320,7 @@ static BodyStreamBuffer* ExtractBody(ScriptState* script_state,
     if (exception_state.HadException())
       return nullptr;
 
+    ReportTaintSink(string, "fetch.body");
     body_byte_length = string.length();
     return_buffer = BodyStreamBuffer::Create(
         script_state, MakeGarbageCollected<FormDataBytesConsumer>(string),
@@ -830,6 +832,14 @@ Request* Request::CreateRequestWithRequestOrString(
     }
     if (exception_state.HadException())
       return nullptr;
+
+    String request_url = request->Url().GetString();
+    for (const auto& header : r->request_->HeaderList()->List()) {
+      String header_key = header.first;
+      String header_value = header.second;
+      ReportTaintSink(header_key, "fetch.header(key)", request_url);
+      ReportTaintSink(header_value, "fetch.header(value)", request_url);
+    }
   }
 
   // "Let |inputBody| be |input|'s request's body if |input| is a
@@ -1066,7 +1076,10 @@ String Request::method() const {
 }
 
 const KURL& Request::url() const {
-  return request_->Url();
+  const KURL& result = request_->Url();
+  String taint_target = result.GetString();
+  ReportTaintSink(taint_target, "fetch.url");
+  return result;
 }
 
 V8RequestDestination Request::destination() const {

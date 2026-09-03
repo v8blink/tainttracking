@@ -31,6 +31,7 @@
 #include "third_party/blink/public/common/features.h"
 #include "third_party/blink/public/platform/task_type.h"
 #include "third_party/blink/renderer/core/dom/document.h"
+#include "third_party/blink/renderer/core/tainting/taint_util.h"
 #include "third_party/blink/renderer/core/dom/quota_exceeded_error.h"
 #include "third_party/blink/renderer/core/frame/local_dom_window.h"
 #include "third_party/blink/renderer/core/frame/local_frame.h"
@@ -116,7 +117,9 @@ String StorageArea::getItem(const String& key,
     exception_state.ThrowSecurityError(StorageArea::kAccessDeniedMessage);
     return String();
   }
-  return cached_area_->GetItem(key);
+  String result = cached_area_->GetItem(key);
+  MarkTaintSource(result, "localStorage.getItem");
+  return result;
 }
 
 NamedPropertySetterResult StorageArea::setItem(
@@ -127,6 +130,11 @@ NamedPropertySetterResult StorageArea::setItem(
     exception_state.ThrowSecurityError(StorageArea::kAccessDeniedMessage);
     return NamedPropertySetterResult::kIntercepted;
   }
+  const char* sink_name = storage_type_ == StorageType::kSessionStorage
+                              ? "sessionStorage.setItem"
+                              : "localStorage.setItem";
+  ReportTaintSink(value, sink_name);
+  ReportTaintSink(key, sink_name);
   if (!cached_area_->SetItem(key, value, this)) {
     QuotaExceededError::Throw(
         exception_state,

@@ -3,6 +3,7 @@
 // found in the LICENSE file.
 
 #include "third_party/blink/renderer/modules/push_messaging/push_subscription.h"
+#include "third_party/blink/renderer/core/tainting/taint_util.h"
 
 #include <memory>
 
@@ -111,7 +112,9 @@ ScriptObject PushSubscription::toJSONForBinding(ScriptState* script_state) {
   DCHECK(p256dh_);
 
   V8ObjectBuilder result(script_state);
-  result.AddString("endpoint", endpoint().GetString());
+  String endpoint_str = endpoint().GetString();
+  MarkTaintSource(endpoint_str, "PushSubscription.endpoint");
+  result.AddString("endpoint", endpoint_str);
 
   if (expiration_time_) {
     result.AddNumber("expirationTime", *expiration_time_);

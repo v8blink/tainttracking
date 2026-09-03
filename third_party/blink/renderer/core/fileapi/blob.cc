@@ -42,6 +42,7 @@
 #include "third_party/blink/renderer/core/fetch/blob_bytes_consumer.h"
 #include "third_party/blink/renderer/core/fetch/body_stream_buffer.h"
 #include "third_party/blink/renderer/core/fileapi/file_read_type.h"
+#include "third_party/blink/renderer/core/tainting/taint_util.h"
 #include "third_party/blink/renderer/core/fileapi/file_reader_client.h"
 #include "third_party/blink/renderer/core/fileapi/file_reader_loader.h"
 #include "third_party/blink/renderer/core/frame/web_feature.h"
@@ -118,6 +119,7 @@ class BlobFileReaderClient : public GarbageCollected<BlobFileReaderClient>,
   void DidFinishLoading(FileReaderData contents) override {
     if (read_type_ == FileReadType::kReadAsText) {
       String result = std::move(contents).AsText("UTF-8");
+      MarkTaintOperation(result, "Blob.text");
       resolver_->DowncastTo<IDLUSVString>()->Resolve(result);
     } else if (read_type_ == FileReadType::kReadAsArrayBuffer) {
       DOMArrayBuffer* result = std::move(contents).AsDOMArrayBuffer();

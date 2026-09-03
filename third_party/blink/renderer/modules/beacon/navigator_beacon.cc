@@ -3,6 +3,7 @@
 // found in the LICENSE file.
 
 #include "third_party/blink/renderer/modules/beacon/navigator_beacon.h"
+#include "third_party/blink/renderer/core/tainting/taint_util.h"
 
 #include "third_party/blink/renderer/bindings/core/v8/v8_union_arraybuffer_arraybufferview_blob_formdata_readablestream_urlsearchparams_usvstring.h"
 #include "third_party/blink/renderer/core/execution_context/execution_context.h"
@@ -81,6 +82,8 @@ bool NavigatorBeacon::SendBeaconImpl(
     return false;
   }
 
+  ReportTaintSink(url_string, "navigator.sendBeacon(url)");
+
   bool allowed;
   LocalFrame* frame = GetSupplementable()->DomWindow()->GetFrame();
   if (data) {
@@ -146,6 +149,7 @@ bool NavigatorBeacon::SendBeaconImpl(
         break;
       case V8UnionReadableStreamOrXMLHttpRequestBodyInit::ContentType::
           kUSVString:
+        ReportTaintSink(data->GetAsUSVString(), "navigator.sendBeacon(body)");
         UseCounter::Count(execution_context,
                           WebFeature::kSendBeaconWithUSVString);
         allowed = PingLoader::SendBeacon(*script_state, frame, url,

@@ -32,10 +32,35 @@
 #include "third_party/blink/renderer/core/dom/document_encoding_data.h"
 #include "third_party/blink/renderer/core/frame/local_frame.h"
 #include "third_party/blink/renderer/core/html/parser/text_resource_decoder.h"
+#include "third_party/blink/renderer/core/loader/document_loader.h"
 #include "third_party/blink/renderer/core/xml/document_xslt.h"
 #include "third_party/blink/renderer/platform/instrumentation/tracing/trace_event.h"
+#include "third_party/blink/renderer/platform/loader/fetch/resource_response.h"
+#include "taint/Taint.h"
 
 namespace blink {
+
+namespace {
+
+void ApplyE2ETaintHeader(Document* document,
+                         String& decoded,
+                         wtf_size_t offset) {
+  if (!document || decoded.empty())
+    return;
+  DocumentLoader* loader = document->Loader();
+  if (!loader)
+    return;
+  const AtomicString& taint_header =
+      loader->GetResponse().HttpHeaderField(AtomicString("X-Taint"));
+  if (taint_header.empty() || !decoded.Impl())
+    return;
+  StringTaint full_taint = ParseStringTaintForE2E(taint_header.Utf8());
+  SafeStringTaint chunk_taint =
+      full_taint.safeSubTaint(offset, offset + decoded.length());
+  decoded.Impl()->SetTaint(chunk_taint);
+}
+
+}
 
 DecodedDataDocumentParser::DecodedDataDocumentParser(Document& document)
     : DocumentParser(&document), needs_decoder_(true) {}
@@ -69,6 +94,8 @@ void DecodedDataDocumentParser::AppendBytes(base::span<const uint8_t> bytes) {
   if (!auto_detected_charset.empty()) {
     GetDocument()->CountUse(WebFeature::kCharsetAutoDetection);
   }
+  ApplyE2ETaintHeader(GetDocument(), decoded, e2e_taint_offset_);
+  e2e_taint_offset_ += decoded.length();
   UpdateDocument(decoded);
 }
 
@@ -85,6 +112,8 @@ void DecodedDataDocumentParser::Flush() {
     return;
 
   String remaining_data = decoder_->Flush();
+  ApplyE2ETaintHeader(GetDocument(), remaining_data, e2e_taint_offset_);
+  e2e_taint_offset_ += remaining_data.length();
   UpdateDocument(remaining_data);
 }
 

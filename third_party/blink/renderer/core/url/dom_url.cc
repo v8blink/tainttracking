@@ -29,6 +29,7 @@
 #include "base/auto_reset.h"
 #include "third_party/blink/renderer/core/execution_context/execution_context.h"
 #include "third_party/blink/renderer/core/fileapi/public_url_manager.h"
+#include "third_party/blink/renderer/core/tainting/taint_util.h"
 #include "third_party/blink/renderer/core/url/dom_origin.h"
 #include "third_party/blink/renderer/core/url/url_search_params.h"
 #include "third_party/blink/renderer/platform/bindings/exception_state.h"
@@ -87,6 +88,8 @@ DOMURL* DOMURL::parse(const String& str) {
   if (!url.IsValid()) {
     return nullptr;
   }
+  String url_string = url.GetString();
+  MarkTaintOperation(url_string, "URL.parse", Vector<String>{str});
   return MakeGarbageCollected<DOMURL>(PassKey(), url);
 }
 
@@ -135,7 +138,10 @@ void DOMURL::setSearch(const String& value) {
 
 String DOMURL::CreatePublicURL(ExecutionContext* execution_context,
                                URLRegistrable* registrable) {
-  return execution_context->GetPublicURLManager().RegisterURL(registrable);
+  String public_url =
+      execution_context->GetPublicURLManager().RegisterURL(registrable);
+  MarkTaintOperation(public_url, "URL.createObjectURL");
+  return public_url;
 }
 
 URLSearchParams* DOMURL::searchParams() {

@@ -183,7 +183,7 @@ inline bool HTMLTokenizer::ProcessEntity(SegmentedString& source) {
   } else {
     token_.SetHasEntity();
     for (unsigned i = 0; i < decoded_entity.length; ++i)
-      BufferCharacter(decoded_entity.data[i]);
+      BufferCharacter(decoded_entity.data[i], decoded_entity.taint_);
   }
   return true;
 }
@@ -406,7 +406,7 @@ bool HTMLTokenizer::NextTokenImpl(SegmentedString& source) {
 
     HTML_BEGIN_STATE(kTagNameState) {
       while (!CheckScanFlag(cc, ScanFlags::kTagNameSpecial)) {
-        token_.AppendToName(ToLowerCaseIfAlpha(cc));
+        token_.AppendToName(ToLowerCaseIfAlpha(cc), input_stream_preprocessor_.CurrentTaint());
         if (!input_stream_preprocessor_.AdvancePastNonNewline(source, cc))
           return HaveBufferedCharacterToken();
       }
@@ -845,7 +845,7 @@ bool HTMLTokenizer::NextTokenImpl(SegmentedString& source) {
       } else if (cc == '"' || cc == '\'' || cc == '<' || cc == '=') {
         ParseError();
       }
-      token_.AddNewAttribute(ToLowerCaseIfAlpha(cc));
+      token_.AddNewAttribute(ToLowerCaseIfAlpha(cc), input_stream_preprocessor_.CurrentTaint());
       if (options_.track_attributes_ranges) {
         attributes_ranges_.AddAttribute(source.NumberOfCharactersConsumed());
       }
@@ -855,7 +855,7 @@ bool HTMLTokenizer::NextTokenImpl(SegmentedString& source) {
 
     HTML_BEGIN_STATE(kAttributeNameState) {
       while (!CheckScanFlag(cc, ScanFlags::kAttributeNameSpecial)) {
-        token_.AppendToAttributeName(ToLowerCaseIfAlpha(cc));
+        token_.AppendToAttributeName(ToLowerCaseIfAlpha(cc), input_stream_preprocessor_.CurrentTaint());
         if (!input_stream_preprocessor_.AdvancePastNonNewline(source, cc))
           return HaveBufferedCharacterToken();
       }
@@ -893,7 +893,7 @@ bool HTMLTokenizer::NextTokenImpl(SegmentedString& source) {
       } else {
         DCHECK(cc == '"' || cc == '\'' || cc == '<' || cc == '=');
         ParseError();
-        token_.AppendToAttributeName(ToLowerCaseIfAlpha(cc));
+        token_.AppendToAttributeName(ToLowerCaseIfAlpha(cc), input_stream_preprocessor_.CurrentTaint());
         HTML_CONSUME_NON_NEWLINE(kAttributeNameState);
       }
     }
@@ -914,7 +914,7 @@ bool HTMLTokenizer::NextTokenImpl(SegmentedString& source) {
       } else if (cc == '"' || cc == '\'' || cc == '<') {
         ParseError();
       }
-      token_.AddNewAttribute(ToLowerCaseIfAlpha(cc));
+      token_.AddNewAttribute(ToLowerCaseIfAlpha(cc), input_stream_preprocessor_.CurrentTaint());
       if (options_.track_attributes_ranges) {
         attributes_ranges_.AddAttribute(source.NumberOfCharactersConsumed());
       }
@@ -957,7 +957,7 @@ bool HTMLTokenizer::NextTokenImpl(SegmentedString& source) {
           attributes_ranges_.BeginAttributeValue(
               source.NumberOfCharactersConsumed());
         }
-        token_.AppendToAttributeValue(cc);
+        token_.AppendToAttributeValue(cc, input_stream_preprocessor_.CurrentTaint());
         HTML_ADVANCE_PAST_NON_NEWLINE_TO(kAttributeValueUnquotedState);
       }
     }
@@ -982,7 +982,7 @@ bool HTMLTokenizer::NextTokenImpl(SegmentedString& source) {
         }
         HTML_RECONSUME_IN(kDataState);
       } else {
-        token_.AppendToAttributeValue(cc);
+        token_.AppendToAttributeValue(cc, input_stream_preprocessor_.CurrentTaint());
         HTML_CONSUME(kAttributeValueDoubleQuotedState);
       }
     }
@@ -1007,7 +1007,7 @@ bool HTMLTokenizer::NextTokenImpl(SegmentedString& source) {
         }
         HTML_RECONSUME_IN(kDataState);
       } else {
-        token_.AppendToAttributeValue(cc);
+        token_.AppendToAttributeValue(cc, input_stream_preprocessor_.CurrentTaint());
         HTML_CONSUME(kAttributeValueSingleQuotedState);
       }
     }
@@ -1040,7 +1040,7 @@ bool HTMLTokenizer::NextTokenImpl(SegmentedString& source) {
       } else {
         if (cc == '"' || cc == '\'' || cc == '<' || cc == '=' || cc == '`')
           ParseError();
-        token_.AppendToAttributeValue(cc);
+        token_.AppendToAttributeValue(cc, input_stream_preprocessor_.CurrentTaint());
         HTML_CONSUME_NON_NEWLINE(kAttributeValueUnquotedState);
       }
     }
@@ -1060,7 +1060,7 @@ bool HTMLTokenizer::NextTokenImpl(SegmentedString& source) {
       } else {
         token_.SetHasEntity();
         for (unsigned i = 0; i < decoded_entity.length; ++i) {
-          token_.AppendToAttributeValue(decoded_entity.data[i]);
+          token_.AppendToAttributeValue(decoded_entity.data[i], decoded_entity.taint_);
         }
       }
       // We're supposed to switch back to the attribute value state that
@@ -1223,7 +1223,7 @@ bool HTMLTokenizer::NextTokenImpl(SegmentedString& source) {
       } else if (cc == kEndOfFileMarker) {
         return EmitAndReconsumeInDataState();
       } else {
-        token_.AppendToComment(cc);
+        token_.AppendToComment(cc, input_stream_preprocessor_.CurrentTaint());
         HTML_CONSUME(kContinueBogusCommentState);
       }
     }
@@ -1278,7 +1278,7 @@ bool HTMLTokenizer::NextTokenImpl(SegmentedString& source) {
         ParseError();
         return EmitAndReconsumeInDataState();
       } else {
-        token_.AppendToComment(cc);
+        token_.AppendToComment(cc, input_stream_preprocessor_.CurrentTaint());
         HTML_ADVANCE_TO(kCommentState);
       }
     }
@@ -1295,7 +1295,7 @@ bool HTMLTokenizer::NextTokenImpl(SegmentedString& source) {
         return EmitAndReconsumeInDataState();
       } else {
         token_.AppendToComment('-');
-        token_.AppendToComment(cc);
+        token_.AppendToComment(cc, input_stream_preprocessor_.CurrentTaint());
         HTML_ADVANCE_TO(kCommentState);
       }
     }
@@ -1308,7 +1308,7 @@ bool HTMLTokenizer::NextTokenImpl(SegmentedString& source) {
         ParseError();
         return EmitAndReconsumeInDataState();
       } else {
-        token_.AppendToComment(cc);
+        token_.AppendToComment(cc, input_stream_preprocessor_.CurrentTaint());
         HTML_CONSUME(kCommentState);
       }
     }
@@ -1322,7 +1322,7 @@ bool HTMLTokenizer::NextTokenImpl(SegmentedString& source) {
         return EmitAndReconsumeInDataState();
       } else {
         token_.AppendToComment('-');
-        token_.AppendToComment(cc);
+        token_.AppendToComment(cc, input_stream_preprocessor_.CurrentTaint());
         HTML_ADVANCE_TO(kCommentState);
       }
     }
@@ -1345,7 +1345,7 @@ bool HTMLTokenizer::NextTokenImpl(SegmentedString& source) {
         ParseError();
         token_.AppendToComment('-');
         token_.AppendToComment('-');
-        token_.AppendToComment(cc);
+        token_.AppendToComment(cc, input_stream_preprocessor_.CurrentTaint());
         HTML_ADVANCE_TO(kCommentState);
       }
     }
@@ -1366,7 +1366,7 @@ bool HTMLTokenizer::NextTokenImpl(SegmentedString& source) {
         token_.AppendToComment('-');
         token_.AppendToComment('-');
         token_.AppendToComment('!');
-        token_.AppendToComment(cc);
+        token_.AppendToComment(cc, input_stream_preprocessor_.CurrentTaint());
         HTML_ADVANCE_TO(kCommentState);
       }
     }
@@ -1417,7 +1417,7 @@ bool HTMLTokenizer::NextTokenImpl(SegmentedString& source) {
         token_.SetForceQuirks();
         return EmitAndReconsumeInDataState();
       } else {
-        token_.AppendToName(ToLowerCaseIfAlpha(cc));
+        token_.AppendToName(ToLowerCaseIfAlpha(cc), input_stream_preprocessor_.CurrentTaint());
         HTML_CONSUME_NON_NEWLINE(kDOCTYPENameState);
       }
     }
@@ -1803,7 +1803,7 @@ bool HTMLTokenizer::EmitData(SegmentedString& source, UChar cc) {
     cc = source.CurrentChar();
   while (true) {
     while (!CheckScanFlag(cc, ScanFlags::kCharacterTokenSpecial)) {
-      token_.AppendToCharacter(cc);
+      token_.AppendToCharacter(cc, source.CurrentTaint());
       cc = source.AdvancePastNonNewline();
     }
     switch (cc) {
@@ -1818,7 +1818,7 @@ bool HTMLTokenizer::EmitData(SegmentedString& source, UChar cc) {
         cc = source.CurrentChar();
         break;
       case '\n':
-        token_.AppendToCharacter(cc);
+        token_.AppendToCharacter(cc, source.CurrentTaint());
         cc = source.AdvancePastNewlineAndUpdateLineNumber();
         break;
       case '\r':
@@ -1835,7 +1835,7 @@ bool HTMLTokenizer::EmitData(SegmentedString& source, UChar cc) {
           return EmitEndOfFile(source);
         break;
       case '{':
-        token_.AppendToCharacter(cc);
+        token_.AppendToCharacter(cc, source.CurrentTaint());
         cc = source.AdvancePastNonNewline();
         break;
       default:
@@ -1850,12 +1850,12 @@ bool HTMLTokenizer::EmitPLAINTEXT(SegmentedString& source, UChar cc) {
     cc = source.CurrentChar();
   while (true) {
     while (!CheckScanFlag(cc, ScanFlags::kNullOrNewline)) {
-      token_.AppendToCharacter(cc);
+      token_.AppendToCharacter(cc, source.CurrentTaint());
       cc = source.AdvancePastNonNewline();
     }
     switch (cc) {
       case '\n':
-        token_.AppendToCharacter(cc);
+        token_.AppendToCharacter(cc, source.CurrentTaint());
         cc = source.AdvancePastNewlineAndUpdateLineNumber();
         break;
       case '\r':

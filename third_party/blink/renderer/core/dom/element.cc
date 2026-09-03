@@ -25,6 +25,7 @@
  */
 
 #include "third_party/blink/renderer/core/dom/element.h"
+#include "third_party/blink/renderer/core/tainting/taint_util.h"
 
 #include <algorithm>
 #include <bitset>
@@ -200,9 +201,16 @@
 #include "third_party/blink/renderer/core/html/forms/html_options_collection.h"
 #include "third_party/blink/renderer/core/html/forms/html_select_element.h"
 #include "third_party/blink/renderer/core/html/forms/html_submit_button_behavior.h"
+#include "third_party/blink/renderer/core/html/forms/html_form_element.h"
 #include "third_party/blink/renderer/core/html/html_anchor_element.h"
 #include "third_party/blink/renderer/core/html/html_area_element.h"
 #include "third_party/blink/renderer/core/html/html_body_element.h"
+#include "third_party/blink/renderer/core/html/html_embed_element.h"
+#include "third_party/blink/renderer/core/html/html_iframe_element.h"
+#include "third_party/blink/renderer/core/html/html_object_element.h"
+#include "third_party/blink/renderer/core/html/html_source_element.h"
+#include "third_party/blink/renderer/core/html/media/html_media_element.h"
+#include "third_party/blink/renderer/core/html/track/html_track_element.h"
 #include "third_party/blink/renderer/core/html/html_collection.h"
 #include "third_party/blink/renderer/core/html/html_dialog_element.h"
 #include "third_party/blink/renderer/core/html/html_document.h"
@@ -2220,7 +2228,11 @@ const AtomicString& Element::getAttribute(const QualifiedName& name) const {
   }
   SynchronizeAttribute(name);
   if (const Attribute* attribute = GetElementData()->Attributes().Find(name)) {
-    return attribute->Value();
+    const AtomicString& result = attribute->Value();
+    String taint_target = result;
+    MarkTaintSourceAttribute(taint_target, "element.attribute", this,
+                             name.LocalName());
+    return result;
   }
   return g_null_atom;
 }
@@ -9507,6 +9519,8 @@ void Element::SetInnerHTMLInternal(
     return;
   }
 
+  ReportTaintSink(html, "innerHTML");
+
   DocumentFragment* fragment =
       ParseHTMLFragment(html,
                         {.sanitizer_mode = sanitizer_mode,
@@ -9562,6 +9576,7 @@ void Element::SetOuterHTMLInternal(const String& html,
   if (exception_state.HadException()) {
     return;
   }
+  ReportTaintSink(html, "outerHTML");
   // https://html.spec.whatwg.org/multipage/dynamic-markup-insertion.html#the-outerhtml-property
   ContainerNode* p = parentNode();
   if (!p) {
@@ -9851,6 +9866,7 @@ Element* Element::insertAdjacentElement(const String& where,
 void Element::insertAdjacentText(const String& where,
                                  const String& text,
                                  ExceptionState& exception_state) {
+  ReportTaintSink(text, "insertAdjacentText");
   InsertAdjacent(where, GetDocument().createTextNode(text), exception_state);
 }
 
@@ -9861,6 +9877,7 @@ void Element::InsertAdjacentHTMLInternal(const String& where,
   if (exception_state.HadException()) {
     return;
   }
+  ReportTaintSink(html, "insertAdjacentHTML");
   Node* context_node = ContextNodeForInsertion(where, this, exception_state);
   if (!context_node) {
     return;
@@ -11467,7 +11484,18 @@ KURL Element::HrefURL() const {
   return KURL();
 }
 
+void Element::TaintSelectorOperation(const char* operation) {
+  TaintFlow flow;
+  MarkTaintSource(flow, operation, this);
+  mTaintList.append(flow);
+}
+
 String Element::GetURLAttribute(const QualifiedName& name) const {
+  StringView stripped_value =
+      StripLeadingAndTrailingHtmlSpaces(getAttribute(name));
+  KURL url = GetDocument().CompleteURL(stripped_value);
+  String result = url.IsValid() ? url.GetString() : stripped_value.ToString();
+  MarkTaintSourceAttribute(result, "element.attribute", this, name.ToString());
 #if DCHECK_IS_ON()
   if (HasElementData()) {
     if (const Attribute* attribute = Attributes().Find(name)) {
@@ -11475,10 +11503,7 @@ String Element::GetURLAttribute(const QualifiedName& name) const {
     }
   }
 #endif
-  StringView stripped_value =
-      StripLeadingAndTrailingHtmlSpaces(getAttribute(name));
-  KURL url = GetDocument().CompleteURL(stripped_value);
-  return url.IsValid() ? url.GetString() : stripped_value.ToString();
+  return result;
 }
 
 KURL Element::GetURLAttributeAsKURL(const QualifiedName& name) const {
@@ -13607,6 +13632,41 @@ ALWAYS_INLINE void Element::SetAttributeInternal(
       RemoveAttributeInternal(index, reason);
     }
     return;
+  }
+
+  const String& attr_value = new_value.GetString();
+  if (name == html_names::kHrefAttr && IsA<HTMLAnchorElement>(*this)) {
+    ReportTaintSink(attr_value, "a.href");
+  } else if (name == html_names::kHrefAttr && IsA<HTMLAreaElement>(*this)) {
+    ReportTaintSink(attr_value, "area.href");
+  } else if (name == html_names::kSrcAttr && IsA<HTMLIFrameElement>(*this)) {
+    ReportTaintSink(attr_value, "iframe.src");
+  } else if (name == html_names::kSrcdocAttr && IsA<HTMLIFrameElement>(*this)) {
+    ReportTaintSink(attr_value, "iframe.srcdoc");
+  } else if (name == html_names::kSrcAttr && IsA<HTMLImageElement>(*this)) {
+    ReportTaintSink(attr_value, "img.src");
+  } else if (name == html_names::kSrcsetAttr && IsA<HTMLImageElement>(*this)) {
+    ReportTaintSink(attr_value, "img.srcset");
+  } else if (name == html_names::kSrcAttr && IsA<HTMLMediaElement>(*this)) {
+    ReportTaintSink(attr_value, "media.src");
+  } else if (name == html_names::kSrcAttr && IsA<HTMLSourceElement>(*this)) {
+    ReportTaintSink(attr_value, "source.src");
+  } else if (name == html_names::kSrcAttr && IsA<HTMLTrackElement>(*this)) {
+    ReportTaintSink(attr_value, "track.src");
+  } else if (name == html_names::kSrcAttr && IsA<HTMLEmbedElement>(*this)) {
+    ReportTaintSink(attr_value, "embed.src");
+  } else if (name == html_names::kDataAttr && IsA<HTMLObjectElement>(*this)) {
+    ReportTaintSink(attr_value, "object.data");
+  } else if (name == html_names::kActionAttr && IsA<HTMLFormElement>(*this)) {
+    ReportTaintSink(attr_value, "form.action");
+  } else if (name == html_names::kSrcAttr && IsA<HTMLScriptElement>(*this)) {
+    ReportTaintSink(attr_value, "script.src");
+  } else if (name == html_names::kStyleAttr) {
+    ReportTaintSink(attr_value, "element.style");
+  } else if (name.LocalName().GetString().starts_with("on")) {
+    ReportTaintSink(attr_value, "eventHandler");
+  } else {
+    ReportTaintSink(attr_value, "setAttribute");
   }
 
   if (index == kNotFound) {

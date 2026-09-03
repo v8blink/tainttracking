@@ -121,10 +121,18 @@ class HTMLToken {
 
     bool NameIsEmpty() const { return name_.IsEmpty(); }
     void AppendToName(UChar c) { name_.AddChar(c); }
+    void AppendToName(UChar c, const SafeStringTaint& taint) {
+      name_.AddChar(c, taint);
+    }
 
     String Value() const { return value_.AsString(); }
 
+    const UCharLiteralBuffer<32>& ValueBuffer() const { return value_; }
+
     void AppendToValue(UChar c) { value_.AddChar(c); }
+    void AppendToValue(UChar c, const SafeStringTaint& taint) {
+      value_.AddChar(c, taint);
+    }
     void ClearValue() { value_.clear(); }
 
    private:
@@ -203,6 +211,14 @@ class HTMLToken {
            type_ == kProcessingInstruction);
     DCHECK(character);
     data_.AddChar(character);
+  }
+
+  ALWAYS_INLINE void AppendToName(UChar character,
+                                  const SafeStringTaint& taint) {
+    DCHECK(type_ == kStartTag || type_ == kEndTag || type_ == DOCTYPE ||
+           type_ == kProcessingInstruction);
+    DCHECK(character);
+    data_.AddChar(character, taint);
   }
 
   /* DOCTYPE Tokens */
@@ -321,16 +337,38 @@ class HTMLToken {
     current_attribute_->AppendToName(character);
   }
 
+  ALWAYS_INLINE void AddNewAttribute(UChar character,
+                                     const SafeStringTaint& taint) {
+    DCHECK(type_ == kStartTag || type_ == kEndTag);
+    attributes_.Grow(attributes_.size() + 1);
+    current_attribute_ = &attributes_.back();
+    current_attribute_->AppendToName(character, taint);
+  }
+
   ALWAYS_INLINE void AppendToAttributeName(UChar character) {
     DCHECK(character);
     DCHECK(type_ == kStartTag || type_ == kEndTag);
     current_attribute_->AppendToName(character);
   }
 
+  ALWAYS_INLINE void AppendToAttributeName(UChar character,
+                                           const SafeStringTaint& taint) {
+    DCHECK(character);
+    DCHECK(type_ == kStartTag || type_ == kEndTag);
+    current_attribute_->AppendToName(character, taint);
+  }
+
   ALWAYS_INLINE void AppendToAttributeValue(UChar character) {
     DCHECK(character);
     DCHECK(type_ == kStartTag || type_ == kEndTag);
     current_attribute_->AppendToValue(character);
+  }
+
+  ALWAYS_INLINE void AppendToAttributeValue(UChar character,
+                                            const SafeStringTaint& taint) {
+    DCHECK(character);
+    DCHECK(type_ == kStartTag || type_ == kEndTag);
+    current_attribute_->AppendToValue(character, taint);
   }
 
   const AttributeList& Attributes() const {
@@ -370,6 +408,12 @@ class HTMLToken {
     data_.AddChar(character);
   }
 
+  ALWAYS_INLINE void AppendToCharacter(UChar character,
+                                       const SafeStringTaint& taint) {
+    DCHECK_EQ(type_, kCharacter);
+    data_.AddChar(character, taint);
+  }
+
   ALWAYS_INLINE void AppendToCharacter(
       const LCharLiteralBuffer<32>& characters) {
     DCHECK_EQ(type_, kCharacter);
@@ -401,6 +445,13 @@ class HTMLToken {
     DCHECK(character);
     DCHECK_EQ(type_, kComment);
     data_.AddChar(character);
+  }
+
+  ALWAYS_INLINE void AppendToComment(UChar character,
+                                     const SafeStringTaint& taint) {
+    DCHECK(character);
+    DCHECK_EQ(type_, kComment);
+    data_.AddChar(character, taint);
   }
 
   ALWAYS_INLINE void AppendToProcessingInstructionData(UChar character) {

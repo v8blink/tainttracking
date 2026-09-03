@@ -402,8 +402,14 @@ class HTMLFastPathParser {
   static_assert(std::is_same_v<Char, UChar> || std::is_same_v<Char, LChar>);
 
  public:
-  HTMLFastPathParser(Span source, Document& document, ContainerNode& root_node)
-      : source_(source), document_(document), root_node_(root_node) {}
+  HTMLFastPathParser(Span source,
+                     Document& document,
+                     ContainerNode& root_node,
+                     const StringTaint& source_taint)
+      : source_(source),
+        document_(document),
+        root_node_(root_node),
+        source_taint_(source_taint) {}
 
   bool Run(Element& context_element, HTMLFragmentParsingBehaviorSet behavior) {
     QualifiedName context_tag = context_element.TagQName();
@@ -462,6 +468,7 @@ class HTMLFastPathParser {
   Span source_;
   Document& document_;
   ContainerNode& root_node_;
+  SafeStringTaint source_taint_;
 
   const size_t end_ = source_.size();
   size_t pos_ = 0;
@@ -874,7 +881,8 @@ class HTMLFastPathParser {
       } else if (cur == '\0') [[unlikely]] {
         return Fail(HtmlFastPathResult::kFailedContainsNull, nullptr);
       } else {
-        uchar_buffer_.AddChar(cur);
+        uchar_buffer_.AddChar(
+            cur, source_taint_.safeSubTaint(static_cast<uint32_t>(pos_)));
         ++pos_;
       }
     }
@@ -1126,7 +1134,9 @@ class HTMLFastPathParser {
           ++pos_;
         } else {
           // SAFETY: safe when pos_ != end_.
-          uchar_buffer_.AddChar(UNSAFE_BUFFERS(source_.data()[pos_]));
+          uchar_buffer_.AddChar(
+              UNSAFE_BUFFERS(source_.data()[pos_]),
+              source_taint_.safeSubTaint(static_cast<uint32_t>(pos_)));
           ++pos_;
         }
       }
@@ -1150,6 +1160,8 @@ class HTMLFastPathParser {
 
   void ScanHTMLCharacterReference(UCharLiteralBufferType* out) {
     DCHECK_EQ(source_[pos_], '&');
+    const SafeStringTaint ref_taint =
+        source_taint_.safeSubTaint(static_cast<uint32_t>(pos_));
     ++pos_;
     size_t start = pos_;
     while (true) {
@@ -1213,21 +1225,21 @@ class HTMLFastPathParser {
       DecodedHTMLEntity entity;
       AppendLegalEntityFor(res, entity);
       for (size_t i = 0; i < entity.length; ++i) {
-        out->AddChar(entity.data[i]);
+        out->AddChar(entity.data[i], ref_taint);
       }
       // Handle the most common named references.
     } else if (static constexpr auto amp = base::span_from_cstring("amp");
                reference == amp) {
-      out->AddChar('&');
+      out->AddChar('&', ref_taint);
     } else if (static constexpr auto lt = base::span_from_cstring("lt");
                reference == lt) {
-      out->AddChar('<');
+      out->AddChar('<', ref_taint);
     } else if (static constexpr auto gt = base::span_from_cstring("gt");
                reference == gt) {
-      out->AddChar('>');
+      out->AddChar('>', ref_taint);
     } else if (static constexpr auto nbsp = base::span_from_cstring("nbsp");
                reference == nbsp) {
-      out->AddChar(0xa0);
+      out->AddChar(0xa0, ref_taint);
     } else {
       // This handles uncommon named references.
       // This does not use `reference` as `reference` does not contain the `;`,
@@ -1241,7 +1253,7 @@ class HTMLFastPathParser {
         return Fail(HtmlFastPathResult::kFailedParsingCharacterReference);
       }
       for (size_t i = 0; i < entity.length; ++i) {
-        out->AddChar(entity.data[i]);
+        out->AddChar(entity.data[i], ref_taint);
       }
       // ConsumeHTMLEntity() may not have consumed all the input.
       const unsigned remaining_length = input_segmented.length();
@@ -1299,8 +1311,16 @@ class HTMLFastPathParser {
             text.size() >= HTMLConstructionSite::kObsoleteTextNodeLengthLimit) {
           return Fail(HtmlFastPathResult::kFailedBigText);
         }
+        String text_string = scanned_text.TryCanonicalizeString();
+        if (source_taint_.hasTaint() && text_string.Impl()) {
+          size_t text_offset = static_cast<size_t>(scanned_text.text.data() -
+                                                    source_.data());
+          text_string.Impl()->SetTaint(source_taint_.safeSubTaint(
+              static_cast<uint32_t>(text_offset),
+              static_cast<uint32_t>(text_offset + scanned_text.text.size())));
+        }
         parent->ParserAppendChildInDocumentFragment(
-            Text::Create(document_, scanned_text.TryCanonicalizeString()));
+            Text::Create(document_, text_string));
       } else if (scanned_text.escaped_text) {
         if (RuntimeEnabledFeatures::SplitLargeTextNodesEnabled() &&
             scanned_text.escaped_text->size() >=
@@ -1776,9 +1796,10 @@ bool TryParsingHTMLFragmentImpl(const base::span<const Char>& source,
                                 ContainerNode& root_node,
                                 Element& context_element,
                                 HTMLFragmentParsingBehaviorSet behavior,
-                                bool* failed_because_unsupported_tag) {
+                                bool* failed_because_unsupported_tag,
+                                const StringTaint& source_taint) {
   base::ElapsedTimer parse_timer;
-  HTMLFastPathParser<Char> parser{source, document, root_node};
+  HTMLFastPathParser<Char> parser{source, document, root_node, source_taint};
   const bool success = parser.Run(context_element, behavior);
   LogFastPathResult(parser.parse_result());
   size_t number_of_bytes_parsed = parser.NumberOfBytesParsed();
@@ -1839,13 +1860,17 @@ bool TryParsingHTMLFragment(const String& source,
   if (!CanUseFastPath(document, context_element, policy, behavior)) {
     return false;
   }
+  SafeStringTaint source_taint;
+  if (source.Impl()) {
+    source_taint = source.Impl()->Taint();
+  }
   return source.Is8Bit()
              ? TryParsingHTMLFragmentImpl<LChar>(
                    source.Span8(), document, parent, context_element, behavior,
-                   failed_because_unsupported_tag)
+                   failed_because_unsupported_tag, source_taint)
              : TryParsingHTMLFragmentImpl<UChar>(
                    source.Span16(), document, parent, context_element, behavior,
-                   failed_because_unsupported_tag);
+                   failed_because_unsupported_tag, source_taint);
 }
 
 void LogTagsForUnsupportedTagTypeFailure(DocumentFragment& fragment) {

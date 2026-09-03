@@ -33,6 +33,7 @@
 #include "third_party/blink/renderer/bindings/core/v8/script_streamer.h"
 #include "third_party/blink/renderer/bindings/core/v8/v8_compile_hints_common.h"
 #include "third_party/blink/renderer/core/core_export.h"
+#include "taint/Taint.h"
 #include "third_party/blink/renderer/core/loader/resource/text_resource.h"
 #include "third_party/blink/renderer/platform/bindings/parkable_string.h"
 #include "third_party/blink/renderer/platform/loader/fetch/integrity_metadata.h"
@@ -212,6 +213,8 @@ class CORE_EXPORT ScriptResource final : public TextResource {
   void SetEncoding(const String& chs) override;
 
  private:
+  String DecodedTextWithTaint(const StringTaint& network_taint);
+
   // Valid state transitions:
   //
   //            kWaitingForDataPipe          DisableStreaming()

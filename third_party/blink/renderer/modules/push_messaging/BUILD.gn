@@ -35,6 +35,7 @@ blink_modules_sources("push_messaging") {
     "service_worker_registration_push.h",
   ]
   deps = [
+    "//taint",
     "//third_party/blink/renderer/modules/manifest",
     "//third_party/blink/renderer/modules/permissions",
   ]

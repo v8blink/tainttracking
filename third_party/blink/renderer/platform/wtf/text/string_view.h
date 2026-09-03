@@ -320,6 +320,9 @@ class WTF_EXPORT StringView {
     return nullptr;
   }
 
+  bool isTainted() const;
+  SafeStringTaint Taint() const;
+
   // Returns the substring of `this` string, starting at `offset` and consisting
   // of at most `len` characters.
   //

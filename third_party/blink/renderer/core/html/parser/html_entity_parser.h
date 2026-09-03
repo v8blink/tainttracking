@@ -62,6 +62,7 @@ class DecodedHTMLEntity {
 
   unsigned length = 0;
   std::array<UChar, kMaxLength> data;
+  SafeStringTaint taint_;
 };
 
 void AppendLegalEntityFor(UChar32 c, DecodedHTMLEntity& decoded_entity);

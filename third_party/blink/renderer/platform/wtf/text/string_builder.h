@@ -77,6 +77,9 @@ class WTF_EXPORT StringBuilder {
     if (!other.length_)
       return;
 
+    if (other.taint_.hasTaint())
+      taint_.concat(other.taint_, length_);
+
     if (!length_ && !HasBuffer() && !other.string_.IsNull()) {
       string_ = other.string_;
       length_ = other.length_;
@@ -108,6 +111,9 @@ class WTF_EXPORT StringBuilder {
     if (view.empty()) {
       return;
     }
+
+    if (view.isTainted())
+      taint_.concat(view.Taint(), length_);
 
     // If we're appending to an empty builder, and there is not a buffer
     // (reserveCapacity has not been called), then retain a view into the
@@ -384,6 +390,10 @@ class WTF_EXPORT StringBuilder {
       string_ = StringType(Span8());
     else
       string_ = StringType(Span16());
+    if constexpr (std::is_same_v<StringType, String>) {
+      if (taint_.hasTaint() && string_.Impl() && string_.length())
+        string_.Impl()->SetTaint(taint_);
+    }
     ClearBuffer();
   }
 
@@ -396,6 +406,7 @@ class WTF_EXPORT StringBuilder {
   unsigned length_ = 0;
   bool is_8bit_ = true;
   bool has_buffer_ = false;
+  SafeStringTaint taint_;
 };
 
 template <typename CharType>

@@ -43,6 +43,7 @@
 #include "third_party/blink/renderer/core/dom/cdata_section.h"
 #include "third_party/blink/renderer/core/dom/comment.h"
 #include "third_party/blink/renderer/core/dom/document.h"
+#include "third_party/blink/renderer/core/tainting/taint_util.h"
 #include "third_party/blink/renderer/core/dom/document_fragment.h"
 #include "third_party/blink/renderer/core/dom/document_parser_timing.h"
 #include "third_party/blink/renderer/core/dom/document_type.h"
@@ -453,7 +454,13 @@ bool XMLDocumentParser::UpdateLeafTextNode() {
   if (!leaf_text_node_)
     return true;
 
-  leaf_text_node_->ParserAppendData(ToString(buffered_text_));
+  String xml_text = ToString(buffered_text_);
+  if (leaf_text_node_->GetDocument().IsXHRDocument() && xml_text.Impl() &&
+      xml_text.length()) {
+    MarkTaintSource(xml_text, "XMLHttpRequest.response");
+    MarkTaintOperation(xml_text, "XMLHttpRequest.responseXML");
+  }
+  leaf_text_node_->ParserAppendData(xml_text);
   buffered_text_.clear();
   leaf_text_node_ = nullptr;
 

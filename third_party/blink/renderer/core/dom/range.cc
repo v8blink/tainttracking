@@ -24,6 +24,7 @@
  */
 
 #include "third_party/blink/renderer/core/dom/range.h"
+#include "third_party/blink/renderer/core/tainting/taint_util.h"
 
 #include "third_party/blink/renderer/core/display_lock/display_lock_document_state.h"
 #include "third_party/blink/renderer/core/display_lock/display_lock_utilities.h"
@@ -1011,6 +1012,7 @@ DocumentFragment* Range::createContextualFragment(
       markup, resolved_options, owner_document_->GetExecutionContext(),
       trusted_types_names::kRange,
       trusted_types_names::kCreateContextualFragment, exception_state);
+  ReportTaintSink(compliant_markup, "Range.createContextualFragment(fragment)");
 
   if (exception_state.HadException()) {
     return nullptr;

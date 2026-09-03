@@ -323,6 +323,18 @@ class WTF_EXPORT String {
   StringImpl* Impl() const { return impl_.get(); }
   scoped_refptr<StringImpl> ReleaseImpl() { return std::move(impl_); }
 
+  const StringTaint& Taint() const {
+    if (impl_)
+      return impl_->Taint();
+    [[clang::no_destroy]] static const SafeStringTaint kEmptyTaint;
+    return kEmptyTaint;
+  }
+  bool IsTainted() const { return impl_ && impl_->isTainted(); }
+  void SetTaint(const StringTaint& taint) {
+    if (impl_)
+      impl_->SetTaint(taint);
+  }
+
   // Returns an LChar span of the underlying representation of the string.
   // This function must only be called on 8-bit strings.
   base::span<const LChar> Span8() const {

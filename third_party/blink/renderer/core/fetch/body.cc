@@ -3,6 +3,7 @@
 // found in the LICENSE file.
 
 #include "third_party/blink/renderer/core/fetch/body.h"
+#include "third_party/blink/renderer/core/tainting/taint_util.h"
 
 #include <memory>
 #include <utility>
@@ -170,6 +171,8 @@ class BodyTextConsumer final : public BodyConsumerBase {
   using ResolveType = IDLUSVString;
 
   void DidFetchDataLoadedString(const String& string) override {
+    String taint_target = string;
+    MarkTaintSource(taint_target, "fetch.text");
     ResolveLater<ResolveType>(string);
   }
 };
@@ -180,6 +183,8 @@ class BodyJsonConsumer final : public BodyConsumerBase {
   using ResolveType = IDLAny;
 
   void DidFetchDataLoadedString(const String& string) override {
+    String taint_target = string;
+    MarkTaintSource(taint_target, "fetch.json");
     if (!Resolver()->GetExecutionContext() ||
         Resolver()->GetExecutionContext()->IsContextDestroyed())
       return;

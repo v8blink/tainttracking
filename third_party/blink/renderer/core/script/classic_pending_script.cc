@@ -32,6 +32,7 @@
 #include "third_party/blink/renderer/core/page/page.h"
 #include "third_party/blink/renderer/core/script/cache_hint_attribute_value.h"
 #include "third_party/blink/renderer/core/script/document_write_intervention.h"
+#include "third_party/blink/renderer/core/tainting/taint_util.h"
 #include "third_party/blink/renderer/core/script/script_loader.h"
 #include "third_party/blink/renderer/platform/bindings/parkable_string.h"
 #include "third_party/blink/renderer/platform/bindings/script_state.h"
@@ -603,8 +604,10 @@ ClassicScript* ClassicPendingScript::GetSource() const {
         GetSchedulingType(), streamer,
         ScriptStreamer::NotStreamingReason::kInlineScript);
 
+    String inline_source_text = source_text_for_inline_script_;
+    MarkTaintOperation(inline_source_text, "script.text");
     return ClassicScript::Create(
-        source_text_for_inline_script_,
+        inline_source_text,
         ClassicScript::StripFragmentIdentifier(source_url_for_inline_script_),
         base_url_for_inline_script_, options_, source_location_type_,
         SanitizeScriptErrors::kDoNotSanitize, cached_metadata_handler,

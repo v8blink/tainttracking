@@ -267,6 +267,7 @@ class UCharLiteralBuffer : public LiteralBufferBase<UChar, kInlineSize> {
       return *this;
     this->Copy(other);
     bitwise_or_all_chars_ = other.bitwise_or_all_chars_;
+    taint_ = other.taint_;
     return *this;
   }
 
@@ -275,6 +276,7 @@ class UCharLiteralBuffer : public LiteralBufferBase<UChar, kInlineSize> {
       return *this;
     this->Copy(other);
     bitwise_or_all_chars_ = other.bitwise_or_all_chars_;
+    taint_ = other.taint_;
     return *this;
   }
 
@@ -284,6 +286,7 @@ class UCharLiteralBuffer : public LiteralBufferBase<UChar, kInlineSize> {
     const UChar other_bitwise_or_all_chars = other.bitwise_or_all_chars_;
     this->Move(std::move(other));
     bitwise_or_all_chars_ = other_bitwise_or_all_chars;
+    taint_ = std::move(other.taint_);
     return *this;
   }
 
@@ -291,6 +294,7 @@ class UCharLiteralBuffer : public LiteralBufferBase<UChar, kInlineSize> {
   ALWAYS_INLINE void clear() {
     this->ClearImpl();
     bitwise_or_all_chars_ = 0;
+    taint_.clear();
   }
 
   ALWAYS_INLINE void AddChar(UChar val) {
@@ -298,22 +302,42 @@ class UCharLiteralBuffer : public LiteralBufferBase<UChar, kInlineSize> {
     bitwise_or_all_chars_ |= val;
   }
 
+  ALWAYS_INLINE void AddChar(UChar val, const StringTaint& char_taint) {
+    this->AddCharImpl(val);
+    bitwise_or_all_chars_ |= val;
+    if (char_taint.hasTaint()) {
+      taint_.concat(char_taint, this->size() - 1);
+    }
+  }
+
   template <blink::wtf_size_t kOtherSize>
   void AppendLiteral(const LCharLiteralBuffer<kOtherSize>& val) {
     this->AppendLiteralImpl(val);
   }
 
+  const StringTaint& Taint() const { return taint_; }
+
   blink::String AsString() const {
+    blink::String result;
     if (Is8Bit()) {
-      return blink::String::Make8BitFrom16BitSource(base::span(*this));
+      result = blink::String::Make8BitFrom16BitSource(base::span(*this));
+    } else {
+      result = blink::String(*this);
     }
-    return blink::String(*this);
+    if (taint_.hasTaint() && result.Impl()) {
+      result.Impl()->SetTaint(taint_);
+    }
+    return result;
   }
 
   blink::AtomicString AsAtomicString() const {
-    return blink::AtomicString(
+    blink::AtomicString result(
         *this, Is8Bit() ? blink::AtomicStringUCharEncoding::kIs8Bit
                         : blink::AtomicStringUCharEncoding::kIs16Bit);
+    if (taint_.hasTaint() && result.Impl()) {
+      result.Impl()->SetTaint(taint_);
+    }
+    return result;
   }
 
   ALWAYS_INLINE bool Is8Bit() const {
@@ -330,6 +354,8 @@ class UCharLiteralBuffer : public LiteralBufferBase<UChar, kInlineSize> {
   // but just checking that at the end is faster than branching
   // all the time.
   UChar bitwise_or_all_chars_ = 0;
+
+  SafeStringTaint taint_;
 };
 
 #undef BUFFER_INLINE_CAPACITY

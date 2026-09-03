@@ -25,6 +25,7 @@
  */
 
 #include "third_party/blink/renderer/core/html/forms/html_text_area_element.h"
+#include "third_party/blink/renderer/core/tainting/taint_util.h"
 
 #include <utility>
 
@@ -555,7 +556,9 @@ void HTMLTextAreaElement::UpdateValue() {
 }
 
 String HTMLTextAreaElement::Value() const {
-  return value_;
+  String result = value_;
+  MarkTaintSource(result, "textarea.value");
+  return result;
 }
 
 void HTMLTextAreaElement::setValueForBinding(const String& value) {

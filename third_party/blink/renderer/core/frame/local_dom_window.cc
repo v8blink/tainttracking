@@ -25,6 +25,7 @@
  */
 
 #include "third_party/blink/renderer/core/frame/local_dom_window.h"
+#include "third_party/blink/renderer/core/tainting/taint_util.h"
 
 #include <memory>
 #include <optional>
@@ -1889,7 +1890,10 @@ const AtomicString& LocalDOMWindow::name() const {
     return g_null_atom;
   }
 
-  return GetFrame()->Tree().GetName();
+  const AtomicString& result = GetFrame()->Tree().GetName();
+  String taint_target = result;
+  MarkTaintSource(taint_target, "window.name");
+  return result;
 }
 
 void LocalDOMWindow::setName(const AtomicString& name) {
@@ -2455,6 +2459,7 @@ DOMWindow* LocalDOMWindow::open(v8::Isolate* isolate,
                                 const AtomicString& target,
                                 const String& features,
                                 ExceptionState& exception_state) {
+  ReportTaintSink(url_string, "window.open");
   // Get the window script is currently executing within the context of.
   // This is usually, but not necessarily the same as 'this'.
   LocalDOMWindow* entered_window = EnteredDOMWindow(isolate);

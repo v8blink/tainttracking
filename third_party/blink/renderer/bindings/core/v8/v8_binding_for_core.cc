@@ -59,6 +59,7 @@
 #include "third_party/blink/renderer/core/workers/worker_or_worklet_global_scope.h"
 #include "third_party/blink/renderer/core/workers/worklet_global_scope.h"
 #include "third_party/blink/renderer/platform/bindings/runtime_call_stats.h"
+#include "third_party/blink/renderer/core/tainting/taint_util.h"
 #include "third_party/blink/renderer/platform/bindings/script_state.h"
 #include "third_party/blink/renderer/platform/bindings/v8_object_constructor.h"
 #include "third_party/blink/renderer/platform/instrumentation/tracing/traced_value.h"
@@ -817,6 +818,11 @@ v8::Local<v8::Value> FromJSONString(ScriptState* script_state,
 
   std::ignore = v8::JSON::Parse(script_state->GetContext(), v8_string, origin)
                     .ToLocal(&parsed);
+  if (!parsed.IsEmpty() && parsed->IsString() && stringified_json.Impl() &&
+      stringified_json.Impl()->isTainted()) {
+    SetV8StringTaint(script_state->GetIsolate(), parsed.As<v8::String>(),
+                     stringified_json.Impl()->Taint());
+  }
   return parsed;
 }
 

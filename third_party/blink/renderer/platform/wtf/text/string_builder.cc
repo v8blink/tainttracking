@@ -81,9 +81,14 @@ String StringBuilder::Substring(unsigned start, unsigned length) const {
   if (!string_.IsNull()) {
     return string_.substr(start, length);
   }
+  String result;
   if (is_8bit_)
-    return String(Span8().subspan(start, length));
-  return String(Span16().subspan(start, length));
+    result = String(Span8().subspan(start, length));
+  else
+    result = String(Span16().subspan(start, length));
+  if (taint_.hasTaint() && result.Impl() && result.length())
+    result.Impl()->SetTaint(taint_.safeSubTaint(start, start + length));
+  return result;
 }
 
 StringView StringBuilder::SubstringView(unsigned start, unsigned length) const {
@@ -130,6 +135,7 @@ void StringBuilder::Swap(StringBuilder& builder) {
   std::swap(length_, builder.length_);
   std::swap(is_8bit_, builder.is_8bit_);
   std::swap(has_buffer_, builder.has_buffer_);
+  std::swap(taint_, builder.taint_);
 }
 
 void StringBuilder::ClearBuffer() {
@@ -151,6 +157,7 @@ void StringBuilder::Clear() {
   string_ = String();
   length_ = 0;
   is_8bit_ = true;
+  taint_.clear();
 }
 
 unsigned StringBuilder::Capacity() const {
@@ -187,6 +194,7 @@ void StringBuilder::Resize(unsigned new_size) {
   // For a shared view, the content is the [0, length_) prefix of `string_`;
   // shrinking just reduces the view length.
   length_ = new_size;
+  taint_.clearAfter(new_size);
   if (HasBuffer()) {
     if (is_8bit_)
       buffer8_.resize(new_size);
@@ -398,6 +406,7 @@ void StringBuilder::erase(unsigned index) {
     EnsureBuffer16(0);
     buffer16_.EraseAt(index);
   }
+  taint_.replace(index, index + 1, 0, EmptyTaint);
   --length_;
 }
 

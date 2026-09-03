@@ -22,6 +22,8 @@
 #include "base/numerics/clamped_math.h"
 #include "url/third_party/mozilla/url_parse.h"
 
+class StringTaint;
+
 namespace url {
 
 // Represents the different behavior between canonicalizing special URLs
@@ -150,6 +152,11 @@ class CanonOutputT {
     return UNSAFE_BUFFERS(base::span(buffer_, buffer_len_));
   }
 
+  void set_source_taint(const ::StringTaint* taint) { source_taint_ = taint; }
+  const ::StringTaint* source_taint() const { return source_taint_; }
+  void set_result_taint(::StringTaint* taint) { result_taint_ = taint; }
+  ::StringTaint* result_taint() const { return result_taint_; }
+
  protected:
   // Grows the given buffer so that it can fit at least |min_additional|
   // characters. Returns true if the buffer could be resized, false on OOM.
@@ -172,6 +179,9 @@ class CanonOutputT {
 
   // Used characters in the buffer.
   size_t cur_len_ = 0;
+
+  const ::StringTaint* source_taint_ = nullptr;
+  ::StringTaint* result_taint_ = nullptr;
 };
 
 // Simple implementation of the CanonOutput using new[]. This class
