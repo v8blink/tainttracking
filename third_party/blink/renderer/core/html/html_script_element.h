@@ -81,6 +81,7 @@ class CORE_EXPORT HTMLScriptElement final : public HTMLElement,
           string_or_trusted_script,
       ExceptionState& exception_state);
   String scriptInnerTextForBinding();
+  String innerHTML() const override;
 
   void setAsync(bool);
   bool async() const;

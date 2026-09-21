@@ -134,7 +134,13 @@ class StringResourceBase {
     } else if (!atomic_string_.IsNull()) {
       impl = atomic_string_.Impl();
     }
-    return impl ? &impl->Taint() : nullptr;
+    if (impl) {
+      return &impl->Taint();
+    }
+    if (ParkableStringImpl* parkable_impl = parkable_string_.Impl()) {
+      return &parkable_impl->Taint();
+    }
+    return nullptr;
   }
 
   const ParkableString& GetParkableString() const { return parkable_string_; }

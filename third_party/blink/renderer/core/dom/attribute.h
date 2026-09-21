@@ -28,6 +28,7 @@
 
 #include "base/containers/span.h"
 #include "build/build_config.h"
+#include "taint/Taint.h"
 #include "third_party/blink/renderer/core/dom/qualified_name.h"
 #include "third_party/blink/renderer/platform/wtf/allocator/allocator.h"
 
@@ -62,9 +63,15 @@ class Attribute {
 
  public:
   Attribute(const QualifiedName& name, const AtomicString& value)
-      : name_(name), value_(value) {}
+      : name_(name), value_(value), taint_(value_.GetString().Taint()) {}
   Attribute(QualifiedName&& name, AtomicString&& value)
-      : name_(std::move(name)), value_(std::move(value)) {}
+      : name_(std::move(name)),
+        value_(std::move(value)),
+        taint_(value_.GetString().Taint()) {}
+  Attribute(const QualifiedName& name,
+            const AtomicString& value,
+            const StringTaint& taint)
+      : name_(name), value_(value), taint_(taint) {}
 
   // NOTE: The references returned by these functions are only valid for as long
   // as the Attribute stays in place. For example, calling a function that
@@ -76,11 +83,20 @@ class Attribute {
 
   const QualifiedName& GetName() const { return name_; }
 
+  const StringTaint& Taint() const { return taint_; }
+
   bool IsEmpty() const { return value_.empty(); }
   bool Matches(const QualifiedName&) const;
   bool MatchesCaseInsensitive(const QualifiedName&) const;
 
-  void SetValue(const AtomicString& value) { value_ = value; }
+  void SetValue(const AtomicString& value) {
+    value_ = value;
+    taint_ = value_.GetString().Taint();
+  }
+  void SetValue(const AtomicString& value, const StringTaint& taint) {
+    value_ = value;
+    taint_ = taint;
+  }
 
   // Note: This API is only for HTMLTreeBuilder.  It is not safe to change the
   // name of an attribute once parseAttribute has been called as DOM
@@ -93,13 +109,36 @@ class Attribute {
   Attribute();
 #endif
 
-  bool operator==(const Attribute& other) const = default;
+  bool operator==(const Attribute& other) const {
+    return name_ == other.name_ && value_ == other.value_ &&
+           SameTaint(taint_, other.taint_);
+  }
 
  private:
+  static bool SameTaint(const StringTaint& a, const StringTaint& b) {
+    if (a.hasTaint() != b.hasTaint()) {
+      return false;
+    }
+    if (!a.hasTaint()) {
+      return true;
+    }
+    auto ia = a.begin();
+    auto ib = b.begin();
+    for (; ia != a.end() && ib != b.end(); ++ia, ++ib) {
+      if (ia->begin() != ib->begin() || ia->end() != ib->end() ||
+          ia->flow() != ib->flow()) {
+        return false;
+      }
+    }
+    return ia == a.end() && ib == b.end();
+  }
+
   QualifiedName name_;
   AtomicString value_;
+  SafeStringTaint taint_;
 };
-static_assert(sizeof(Attribute) == sizeof(QualifiedName) + sizeof(AtomicString),
+static_assert(sizeof(Attribute) == sizeof(QualifiedName) + sizeof(AtomicString) +
+                                       sizeof(SafeStringTaint),
               "AttributeHash() assumes Attribute has no padding");
 
 inline bool Attribute::Matches(const QualifiedName& qualified_name) const {

@@ -56,11 +56,19 @@ struct DowncastTraits<HTMLTagCollection> {
 
 inline bool HTMLTagCollection::ElementMatches(
     const Element& test_element) const {
-  if (qualified_name_ == g_star_atom)
-    return true;
-  if (test_element.IsHTMLElement())
-    return lowered_qualified_name_ == test_element.TagQName().ToString();
-  return qualified_name_ == test_element.TagQName().ToString();
+  bool matches = qualified_name_ == g_star_atom;
+  if (!matches) {
+    matches = test_element.IsHTMLElement()
+                  ? lowered_qualified_name_ ==
+                        test_element.TagQName().ToString()
+                  : qualified_name_ == test_element.TagQName().ToString();
+  }
+  if (matches) {
+    const_cast<Element&>(test_element)
+        .TaintSelectorOperation("document.getElementsByTagName",
+                                qualified_name_);
+  }
+  return matches;
 }
 
 }  // namespace blink

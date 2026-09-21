@@ -44,6 +44,9 @@ CORE_EXPORT void MarkTaintSource(ScriptState* script_state,
 CORE_EXPORT void MarkTaintSource(TaintFlow& flow,
                                  const char* name,
                                  const Node* node);
+CORE_EXPORT void MarkTaintSource(TaintFlow& flow,
+                                 const char* name,
+                                 const String& arg);
 
 CORE_EXPORT void MarkTaintOperation(String& str, const char* name);
 CORE_EXPORT void MarkTaintOperation(String& str,

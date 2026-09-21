@@ -43,6 +43,7 @@
 #include "third_party/blink/public/web/web_autofill_state.h"
 #include "third_party/blink/renderer/bindings/core/v8/dictionary.h"
 #include "third_party/blink/renderer/bindings/core/v8/frozen_array.h"
+#include "third_party/blink/renderer/bindings/core/v8/native_value_traits_impl.h"
 #include "third_party/blink/renderer/bindings/core/v8/script_promise_resolver.h"
 #include "third_party/blink/renderer/bindings/core/v8/v8_aria_notification_options.h"
 #include "third_party/blink/renderer/bindings/core/v8/v8_binding_for_core.h"
@@ -2230,11 +2231,52 @@ const AtomicString& Element::getAttribute(const QualifiedName& name) const {
   if (const Attribute* attribute = GetElementData()->Attributes().Find(name)) {
     const AtomicString& result = attribute->Value();
     String taint_target = result;
+    if (attribute->Taint().hasTaint()) {
+      taint_target.SetTaint(attribute->Taint());
+    }
     MarkTaintSourceAttribute(taint_target, "element.attribute", this,
                              name.LocalName());
     return result;
   }
   return g_null_atom;
+}
+
+String Element::getAttribute(
+    const bindings::NativeValueTraitsStringAdapter& local_name) const {
+  AtomicString name = local_name;
+  AtomicStringTable::WeakResult hint = WeakLowercaseIfNecessary(name);
+  if (!HasElementData()) {
+    return String();
+  }
+  SynchronizeAttributeHinted(name, hint);
+  const Attribute* attribute =
+      GetElementData()->Attributes().FindHinted(name, hint);
+  if (!attribute) {
+    return String();
+  }
+  const AtomicString& value = attribute->Value();
+  if (!value.Impl()) {
+    return String();
+  }
+  String result =
+      value.Is8Bit() ? String(value.Span8()) : String(value.Span16());
+  if (result.length() && attribute->Taint().hasTaint()) {
+    result.SetTaint(attribute->Taint());
+  }
+  MarkTaintSourceAttribute(result, "element.attribute", this, name);
+  return result;
+}
+
+void Element::setAttribute(
+    const bindings::NativeValueTraitsStringAdapter& name,
+    const bindings::NativeValueTraitsStringAdapter& value,
+    ExceptionState& exception_state) {
+  AtomicString local_name = name;
+  String string_value = value;
+  AtomicStringTable::WeakResult weak_lowercase_name =
+      WeakLowercaseIfNecessary(local_name);
+  SetAttributeHinted(std::move(local_name), weak_lowercase_name, string_value,
+                     exception_state);
 }
 
 AtomicString Element::LowercaseIfNecessary(AtomicString name) const {
@@ -4194,7 +4236,7 @@ Node::InsertionNotificationRequest Element::InsertedInto(
       }
     }
 
-    ProcessElementRenderBlocking(GetIdAttribute());
+    ProcessElementRenderBlocking(GetIdNoTainting());
   }
 
   if (isConnected()) {
@@ -4216,12 +4258,12 @@ Node::InsertionNotificationRequest Element::InsertedInto(
     return kInsertionDone;
   }
 
-  const AtomicString& id_value = GetIdAttribute();
+  const AtomicString& id_value = GetIdNoTainting();
   if (!id_value.IsNull()) {
     UpdateId(scope, g_null_atom, id_value);
   }
 
-  const AtomicString& name_value = GetNameAttribute();
+  const AtomicString& name_value = GetNameNoTainting();
   if (!name_value.IsNull()) {
     UpdateName(g_null_atom, name_value);
   }
@@ -4452,13 +4494,13 @@ void Element::RemovedFrom(ContainerNode& insertion_point) {
 
   SetSavedLayerScrollOffset(ScrollOffset());
 
-  const AtomicString& id_value = GetIdAttribute();
+  const AtomicString& id_value = GetIdNoTainting();
   if (insertion_point.IsInTreeScope() && GetTreeScope() == document) {
     if (!id_value.IsNull()) {
       UpdateId(insertion_point.GetTreeScope(), id_value, g_null_atom);
     }
 
-    const AtomicString& name_value = GetNameAttribute();
+    const AtomicString& name_value = GetNameNoTainting();
     if (!name_value.IsNull()) {
       UpdateName(name_value, g_null_atom);
     }
@@ -8141,13 +8183,20 @@ void Element::RemoveAttributeInternal(wtf_size_t index,
 void Element::AppendAttributeInternal(const QualifiedName& name,
                                       const AtomicString& value,
                                       AttributeModificationReason reason) {
+  AppendAttributeInternal(name, value, value.GetString().Taint(), reason);
+}
+
+void Element::AppendAttributeInternal(const QualifiedName& name,
+                                      const AtomicString& value,
+                                      const StringTaint& taint,
+                                      AttributeModificationReason reason) {
   if (reason !=
       AttributeModificationReason::kBySynchronizationOfLazyAttribute) {
     WillModifyAttribute(name, g_null_atom, value);
   }
   attribute_or_class_bloom_ |= FilterForAttribute(name);
   UpdateSubtreeBloomFilterAfterInsert();
-  EnsureUniqueElementData().Attributes().Append(name, value);
+  EnsureUniqueElementData().Attributes().Append(name, value, taint);
   if (reason !=
       AttributeModificationReason::kBySynchronizationOfLazyAttribute) {
     DidAddAttribute(name, value);
@@ -9483,7 +9532,9 @@ String Element::GetOuterHTMLString() const {
 }
 
 String Element::innerHTML() const {
-  return GetInnerHTMLString();
+  String result = GetInnerHTMLString();
+  MarkTaintOperation(result, "element.innerHTML");
+  return result;
 }
 
 String Element::outerHTML() const {
@@ -9519,7 +9570,11 @@ void Element::SetInnerHTMLInternal(
     return;
   }
 
-  ReportTaintSink(html, "innerHTML");
+  if (IsA<HTMLScriptElement>(*this)) {
+    ReportTaintSink(html, "script.innerHTML", this);
+  } else {
+    ReportTaintSink(html, "innerHTML");
+  }
 
   DocumentFragment* fragment =
       ParseHTMLFragment(html,
@@ -11436,6 +11491,23 @@ Element* Element::closest(const AtomicString& selectors) {
   return closest(selectors, ASSERT_NO_EXCEPTION);
 }
 
+Element* Element::closest(
+    const bindings::NativeValueTraitsStringAdapter& selectors,
+    ExceptionState& exception_state) {
+  String selector_string = selectors;
+  AtomicString atomic_selectors;
+  if (!selector_string.IsNull()) {
+    atomic_selectors = selector_string.Is8Bit()
+                           ? AtomicString(selector_string.Span8())
+                           : AtomicString(selector_string.Span16());
+  }
+  Element* result = closest(atomic_selectors, exception_state);
+  if (result) {
+    result->TaintSelectorOperation("element.closest", selector_string);
+  }
+  return result;
+}
+
 DOMTokenList& Element::classList() {
   NodeRareData* rare_data = &EnsureRareData();
   if (!rare_data->GetClassList()) {
@@ -11484,9 +11556,15 @@ KURL Element::HrefURL() const {
   return KURL();
 }
 
-void Element::TaintSelectorOperation(const char* operation) {
+void Element::TaintSelectorOperation(const char* operation,
+                                     const String& selector) {
   TaintFlow flow;
-  MarkTaintSource(flow, operation, this);
+  if (selector.IsTainted() && selector.Impl() &&
+      !selector.Impl()->IsAtomic()) {
+    TaintRange range = *selector.Impl()->Taint().begin();
+    flow = range.flow();
+  }
+  MarkTaintSource(flow, operation, selector);
   mTaintList.append(flow);
 }
 
@@ -13425,7 +13503,13 @@ const AtomicString& Element::GetAttributeHinted(
   SynchronizeAttributeHinted(name, hint);
   if (const Attribute* attribute =
           GetElementData()->Attributes().FindHinted(name, hint)) {
-    return attribute->Value();
+    const AtomicString& result = attribute->Value();
+    String taint_target = result;
+    if (attribute->Taint().hasTaint()) {
+      taint_target.SetTaint(attribute->Taint());
+    }
+    MarkTaintSourceAttribute(taint_target, "element.attribute", this, name);
+    return result;
   }
   return g_null_atom;
 }
@@ -13589,6 +13673,46 @@ void Element::SetAttributeHinted(AtomicString local_name,
 
 void Element::SetAttributeHinted(AtomicString local_name,
                                  AtomicStringTable::WeakResult hint,
+                                 const String& value,
+                                 ExceptionState& exception_state) {
+  bool is_valid = Document::IsValidAttributeLocalName(local_name);
+  if (!is_valid) {
+    exception_state.ThrowDOMException(
+        DOMExceptionCode::kInvalidCharacterError,
+        StrCat({"'", local_name, "' is not a valid attribute name."}));
+    return;
+  }
+  SynchronizeAttributeHinted(local_name, hint);
+
+  auto [index, q_name] =
+      LookupAttributeQNameHinted(std::move(local_name), hint);
+
+  AtomicString atomic_value;
+  if (!value.IsNull()) {
+    atomic_value = value.Is8Bit() ? AtomicString(value.Span8())
+                                  : AtomicString(value.Span16());
+  }
+  String tainted_value = value;
+  if (q_name.LocalName().starts_with("on") ||
+      !GetCheckedAttributeTypes().empty()) [[unlikely]] {
+    AtomicString checked_value = TrustedTypesCheckForAttribute(
+        q_name, atomic_value, "setAttribute", exception_state);
+    if (exception_state.HadException()) {
+      return;
+    }
+    if (checked_value != atomic_value) {
+      tainted_value = checked_value.GetString();
+      atomic_value = std::move(checked_value);
+    }
+    index = ValidateAttributeIndex(index, q_name);
+  }
+
+  SetAttributeInternal(index, q_name, atomic_value, tainted_value,
+                       AttributeModificationReason::kDirectly);
+}
+
+void Element::SetAttributeHinted(AtomicString local_name,
+                                 AtomicStringTable::WeakResult hint,
                                  const V8TrustedType* trusted_string,
                                  ExceptionState& exception_state) {
   if (!Document::IsValidName(local_name)) {
@@ -13627,6 +13751,15 @@ ALWAYS_INLINE void Element::SetAttributeInternal(
     const QualifiedName& name,
     const AtomicString& new_value,
     AttributeModificationReason reason) {
+  SetAttributeInternal(index, name, new_value, new_value.GetString(), reason);
+}
+
+ALWAYS_INLINE void Element::SetAttributeInternal(
+    wtf_size_t index,
+    const QualifiedName& name,
+    const AtomicString& new_value,
+    const String& tainted_value,
+    AttributeModificationReason reason) {
   if (new_value.IsNull()) {
     if (index != kNotFound) {
       RemoveAttributeInternal(index, reason);
@@ -13634,7 +13767,7 @@ ALWAYS_INLINE void Element::SetAttributeInternal(
     return;
   }
 
-  const String& attr_value = new_value.GetString();
+  const String& attr_value = tainted_value;
   if (name == html_names::kHrefAttr && IsA<HTMLAnchorElement>(*this)) {
     ReportTaintSink(attr_value, "a.href");
   } else if (name == html_names::kHrefAttr && IsA<HTMLAreaElement>(*this)) {
@@ -13670,7 +13803,7 @@ ALWAYS_INLINE void Element::SetAttributeInternal(
   }
 
   if (index == kNotFound) {
-    AppendAttributeInternal(name, new_value, reason);
+    AppendAttributeInternal(name, new_value, tainted_value.Taint(), reason);
     return;
   }
 
@@ -13692,7 +13825,7 @@ ALWAYS_INLINE void Element::SetAttributeInternal(
       WillModifyAttribute(existing_attribute_name, existing_attribute_value,
                           new_value);
     }
-    new_attribute.SetValue(new_value);
+    new_attribute.SetValue(new_value, tainted_value.Taint());
     if (reason !=
         AttributeModificationReason::kBySynchronizationOfLazyAttribute) {
       DidModifyAttribute(existing_attribute_name, existing_attribute_value,

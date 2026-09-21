@@ -177,6 +177,10 @@ MarkupFormatter::MarkupFormatter(ResolveUrls resolve_urls_method,
 String MarkupFormatter::ResolveUrlIfNeeded(const Element& element,
                                            const Attribute& attribute) const {
   String value = attribute.Value();
+  if (value.length() && attribute.Taint().hasTaint()) {
+    value = value.Is8Bit() ? String(value.Span8()) : String(value.Span16());
+    value.SetTaint(attribute.Taint());
+  }
   switch (resolve_urls_method_) {
     case ResolveUrls::kAll:
       if (element.IsURLAttribute(attribute))

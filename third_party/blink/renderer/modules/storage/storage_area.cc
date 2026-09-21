@@ -118,7 +118,10 @@ String StorageArea::getItem(const String& key,
     return String();
   }
   String result = cached_area_->GetItem(key);
-  MarkTaintSource(result, "localStorage.getItem");
+  const char* source_name = storage_type_ == StorageType::kSessionStorage
+                                ? "sessionStorage.getItem"
+                                : "localStorage.getItem";
+  MarkTaintSource(result, source_name, key);
   return result;
 }
 
@@ -133,8 +136,11 @@ NamedPropertySetterResult StorageArea::setItem(
   const char* sink_name = storage_type_ == StorageType::kSessionStorage
                               ? "sessionStorage.setItem"
                               : "localStorage.setItem";
-  ReportTaintSink(value, sink_name);
-  ReportTaintSink(key, sink_name);
+  const char* key_sink_name = storage_type_ == StorageType::kSessionStorage
+                                  ? "sessionStorage.setItem(key)"
+                                  : "localStorage.setItem(key)";
+  ReportTaintSink(value, sink_name, key);
+  ReportTaintSink(key, key_sink_name, value);
   if (!cached_area_->SetItem(key, value, this)) {
     QuotaExceededError::Throw(
         exception_state,

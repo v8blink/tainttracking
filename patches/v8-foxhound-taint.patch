@@ -1,0 +1,4754 @@
+diff --git a/BUILD.gn b/BUILD.gn
+index 46f9d685147..e547584b0c1 100644
+--- a/BUILD.gn
++++ b/BUILD.gn
+@@ -4715,6 +4715,7 @@ v8_header_set("v8_internal_headers") {
+     "src/strings/string-hasher.h",
+     "src/strings/string-search.h",
+     "src/strings/string-stream.h",
++    "src/strings/taint.h",
+     "src/strings/unicode-decoder.h",
+     "src/strings/unicode-inl.h",
+     "src/strings/unicode.h",
+@@ -6381,6 +6382,7 @@ v8_cluster_source_set("v8_base_without_compiler") {
+     "src/strings/string-case.cc",
+     "src/strings/string-hasher.cc",
+     "src/strings/string-stream.cc",
++    "src/strings/taint.cc",
+     "src/strings/unicode-decoder.cc",
+     "src/strings/unicode.cc",
+     "src/strings/uri.cc",
+@@ -6900,6 +6902,7 @@ v8_cluster_source_set("v8_base_without_compiler") {
+     ":v8_tracing",
+     ":v8_version",
+     "src/inspector",
++    "//taint",
+     "//third_party/dragonbox",
+     "//third_party/fast_float",
+     "//third_party/highway:libhwy",
+@@ -6927,6 +6930,7 @@ v8_cluster_source_set("v8_base_without_compiler") {
+     ":v8_headers",
+     ":v8_internal_headers",
+     ":v8_maybe_icu",
++    "//taint",
+     "//third_party/simdutf",
+   ]
+   if (v8_enable_experimental_tq_to_tsa) {
+diff --git a/include/v8-internal.h b/include/v8-internal.h
+index 62932865f43..0e40d0ab1a8 100644
+--- a/include/v8-internal.h
++++ b/include/v8-internal.h
+@@ -682,6 +682,7 @@ enum ExternalPointerTag : uint16_t {
+   // External pointers using these tags are kept in a per-Isolate external
+   // pointer table and can only be accessed when this Isolate is active.
+   kNativeContextMicrotaskQueueTag,
++  kStringTaintTag,
+ 
+   // Placeholders for embedder data.
+   kFirstEmbedderDataTag,
+@@ -854,6 +855,7 @@ V8_INLINE static constexpr bool IsManagedExternalPointerType(
+ V8_INLINE static constexpr bool ExternalPointerCanBeEmpty(
+     ExternalPointerTagRange tag_range) {
+   return tag_range.Contains(kArrayBufferExtensionTag) ||
++         tag_range.Contains(kStringTaintTag) ||
+          (tag_range.first <= kLastEmbedderDataTag &&
+           kFirstEmbedderDataTag <= tag_range.last) ||
+          kAnyInterceptorInfoExternalPointerTagRange.Contains(tag_range);
+@@ -980,8 +982,9 @@ class Internals {
+   // the implementation of v8.
+   static const int kHeapObjectMapOffset = 0;
+   static const int kMapInstanceTypeOffset = 1 * kApiTaggedSize + kApiInt32Size;
++  static const int kStringTaintOffset = 1 * kApiTaggedSize + 2 * kApiInt32Size;
+   static const int kStringResourceOffset =
+-      1 * kApiTaggedSize + 2 * kApiInt32Size;
++      kStringTaintOffset + static_cast<int>(sizeof(ExternalPointer_t));
+ 
+   static const int kOddballKindOffset = 4 * kApiTaggedSize + kApiDoubleSize;
+   static const int kJSObjectHeaderSize = 3 * kApiTaggedSize;
+diff --git a/include/v8-primitive.h b/include/v8-primitive.h
+index 8466df80175..d8691d3d238 100644
+--- a/include/v8-primitive.h
++++ b/include/v8-primitive.h
+@@ -13,6 +13,9 @@
+ #include "v8-value.h"         // NOLINT(build/include_directory)
+ #include "v8config.h"         // NOLINT(build/include_directory)
+ 
++class StringTaint;
++class TaintLocation;
++
+ namespace v8 {
+ 
+ class Context;
+@@ -158,6 +161,14 @@ class V8_EXPORT String : public Name {
+    */
+   bool IsOneByte() const;
+ 
++  bool GetTaint(Isolate* isolate, ::StringTaint* out) const;
++  void SetTaint(Isolate* isolate, const ::StringTaint& taint);
++  bool IsTainted(Isolate* isolate) const;
++
++  static void SetFallbackTaintLocation(Isolate* isolate,
++                                       const ::TaintLocation& location);
++  static ::TaintLocation GetFallbackTaintLocation(Isolate* isolate);
++
+   /**
+    * Returns whether this string contain only one byte data,
+    * i.e. ISO-8859-1 code points.
+@@ -319,6 +330,8 @@ class V8_EXPORT String : public Name {
+     virtual void EstimateSharedMemoryUsage(
+         SharedMemoryUsageRecorder* recorder) const {}
+ 
++    virtual const StringTaint* GetTaintPtr() const { return nullptr; }
++
+     // Disallow copying and assigning.
+     ExternalStringResourceBase(const ExternalStringResourceBase&) = delete;
+     void operator=(const ExternalStringResourceBase&) = delete;
+diff --git a/include/v8-script.h b/include/v8-script.h
+index 456831b0b2b..403bbd21078 100644
+--- a/include/v8-script.h
++++ b/include/v8-script.h
+@@ -20,6 +20,8 @@
+ #include "v8-message.h"       // NOLINT(build/include_directory)
+ #include "v8config.h"         // NOLINT(build/include_directory)
+ 
++class StringTaint;
++
+ namespace v8 {
+ 
+ class Function;
+@@ -609,6 +611,8 @@ class V8_EXPORT ScriptCompiler {
+   class ExternalSourceStreamBase {
+    public:
+     virtual ~ExternalSourceStreamBase() = default;
++
++    virtual const StringTaint* GetTaintPtr() const { return nullptr; }
+   };
+ 
+   /**
+diff --git a/src/api/api.cc b/src/api/api.cc
+index 6298f80d299..57b87f3333f 100644
+--- a/src/api/api.cc
++++ b/src/api/api.cc
+@@ -5893,6 +5893,38 @@ bool String::IsOneByte() const {
+   return Utils::OpenDirectHandle(this)->IsOneByteRepresentation();
+ }
+ 
++bool String::GetTaint(Isolate* v8_isolate, ::StringTaint* out) const {
++  i::DirectHandle<i::String> str = Utils::OpenDirectHandle(this);
++  if (!str->IsTainted()) {
++    return false;
++  }
++  if (out != nullptr) {
++    *out = str->GetTaint();
++  }
++  return true;
++}
++
++void String::SetTaint(Isolate* v8_isolate, const ::StringTaint& taint) {
++  i::Isolate* isolate = reinterpret_cast<i::Isolate*>(v8_isolate);
++  i::DirectHandle<i::String> str = Utils::OpenDirectHandle(this);
++  str->SetTaint(isolate, taint);
++}
++
++bool String::IsTainted(Isolate* v8_isolate) const {
++  return Utils::OpenDirectHandle(this)->IsTainted();
++}
++
++void String::SetFallbackTaintLocation(Isolate* v8_isolate,
++                                      const ::TaintLocation& location) {
++  i::Isolate* isolate = reinterpret_cast<i::Isolate*>(v8_isolate);
++  isolate->set_fallback_taint_location(location);
++}
++
++::TaintLocation String::GetFallbackTaintLocation(Isolate* v8_isolate) {
++  i::Isolate* isolate = reinterpret_cast<i::Isolate*>(v8_isolate);
++  return isolate->fallback_taint_location();
++}
++
+ class ContainsOnlyOneByteHelper {
+  public:
+   ContainsOnlyOneByteHelper() : is_one_byte_(true) {}
+diff --git a/src/ast/ast-value-factory.cc b/src/ast/ast-value-factory.cc
+index ed113acbd63..84231a1de21 100644
+--- a/src/ast/ast-value-factory.cc
++++ b/src/ast/ast-value-factory.cc
+@@ -71,6 +71,9 @@ void AstRawString::Internalize(IsolateT* isolate) {
+                          base::Vector<const uint16_t>::cast(literal_bytes_));
+     set_string(isolate->factory()->InternalizeStringWithKey(&key));
+   }
++  if (taint_.hasTaint() && !literal_bytes_.empty()) {
++    (*string_)->SetTaint(isolate, taint_);
++  }
+ }
+ 
+ template EXPORT_TEMPLATE_DEFINE(
+@@ -221,9 +224,24 @@ Handle<String> AstConsString::AllocateFlat(IsolateT* isolate) const {
+   if (IsEmpty()) {
+     return isolate->factory()->empty_string();
+   }
+-  if (!segment_.next) {
++  bool is_tainted = false;
++  for (const AstConsString::Segment* current = &segment_; current != nullptr;
++       current = current->next) {
++    is_tainted = is_tainted || current->string->is_tainted();
++  }
++  if (!segment_.next && !is_tainted) {
+     return segment_.string->string();
+   }
++  SafeStringTaint flat_taint;
++  if (is_tainted) {
++    uint32_t taint_offset = 0;
++    for (const AstRawString* raw_string : ToRawStrings()) {
++      if (raw_string->is_tainted()) {
++        flat_taint.concat(raw_string->taint(), taint_offset);
++      }
++      taint_offset += static_cast<uint32_t>(raw_string->length());
++    }
++  }
+ 
+   int result_length = 0;
+   bool is_one_byte = true;
+@@ -250,6 +268,9 @@ Handle<String> AstConsString::AllocateFlat(IsolateT* isolate) const {
+     }
+     DCHECK_EQ(dest, result->GetChars(
+                         no_gc, SharedStringAccessGuardIfNeeded::NotNeeded()));
++    if (flat_taint.hasTaint()) {
++      result->SetTaint(isolate, flat_taint);
++    }
+     return result;
+   }
+ 
+@@ -275,6 +296,9 @@ Handle<String> AstConsString::AllocateFlat(IsolateT* isolate) const {
+   }
+   DCHECK_EQ(dest, result->GetChars(
+                       no_gc, SharedStringAccessGuardIfNeeded::NotNeeded()));
++  if (flat_taint.hasTaint()) {
++    result->SetTaint(isolate, flat_taint);
++  }
+   return result;
+ }
+ template EXPORT_TEMPLATE_DEFINE(V8_EXPORT_PRIVATE)
+@@ -420,5 +444,20 @@ const AstRawString* AstValueFactory::GetString(
+   return entry->key;
+ }
+ 
++const AstRawString* AstValueFactory::CloneTaintedString(
++    const AstRawString* base_string, const StringTaint& taint) {
++  int length = base_string->byte_length();
++  uint8_t* new_literal_bytes =
++      ast_raw_string_zone()->AllocateArray<uint8_t>(length);
++  memcpy(new_literal_bytes, base_string->raw_data(), length);
++  AstRawString* new_string = ast_raw_string_zone()->New<AstRawString>(
++      base_string->is_one_byte(),
++      base::Vector<const uint8_t>(new_literal_bytes, length),
++      base_string->raw_hash_field());
++  new_string->set_taint(taint);
++  AddString(new_string);
++  return new_string;
++}
++
+ }  // namespace internal
+ }  // namespace v8
+diff --git a/src/ast/ast-value-factory.h b/src/ast/ast-value-factory.h
+index 5ca83bc76f2..663e4d0236b 100644
+--- a/src/ast/ast-value-factory.h
++++ b/src/ast/ast-value-factory.h
+@@ -38,6 +38,7 @@
+ #include "src/numbers/hash-seed.h"
+ #include "src/objects/name.h"
+ #include "src/zone/zone.h"
++#include "taint/Taint.h"
+ 
+ // Ast(Raw|Cons)String and AstValueFactory are for storing strings and
+ // values independent of the V8 heap and internalizing them later. During
+@@ -78,6 +79,10 @@ class AstRawString final : public ZoneObject {
+ 
+   bool IsPrivateName() const { return length() > 0 && FirstCharacter() == '#'; }
+ 
++  const StringTaint& taint() const { return taint_; }
++  void set_taint(const StringTaint& taint) { taint_ = taint.safeCopy(); }
++  bool is_tainted() const { return taint_.hasTaint(); }
++
+   // For storing AstRawStrings in a hash map.
+   uint32_t raw_hash_field() const { return raw_hash_field_; }
+   uint32_t Hash() const {
+@@ -135,6 +140,7 @@ class AstRawString final : public ZoneObject {
+   base::Vector<const uint8_t> literal_bytes_;  // Memory owned by Zone.
+   uint32_t raw_hash_field_;
+   bool is_one_byte_;
++  SafeStringTaint taint_;
+ #ifdef DEBUG
+   // (Debug-only:) Verify the object life-cylce: Some functions may only be
+   // called after internalization (that is, after a v8::internal::String has
+@@ -386,6 +392,9 @@ class AstValueFactory {
+   const AstRawString* GetString(Tagged<String> literal,
+                                 const SharedStringAccessGuardIfNeeded&);
+ 
++  V8_EXPORT_PRIVATE const AstRawString* CloneTaintedString(
++      const AstRawString* base_string, const StringTaint& taint);
++
+   V8_EXPORT_PRIVATE AstConsString* NewConsString();
+   V8_EXPORT_PRIVATE AstConsString* NewConsString(const AstRawString* str);
+   V8_EXPORT_PRIVATE AstConsString* NewConsString(const AstRawString* str1,
+diff --git a/src/builtins/array-join.tq b/src/builtins/array-join.tq
+index c9ec15e06ea..6db6a308b1f 100644
+--- a/src/builtins/array-join.tq
++++ b/src/builtins/array-join.tq
+@@ -4,6 +4,8 @@
+ 
+ namespace array {
+ 
++extern transitioning runtime TaintArrayJoin(Context, String): String;
++
+ type LoadJoinElementFn = builtin(Context, JSReceiver, uintptr) => JSAny;
+ 
+ const kMaxArrayLength: constexpr uint32 generates 'JSArray::kMaxArrayLength';
+@@ -315,8 +317,8 @@ macro NewBuffer(len: uintptr, sep: String): Buffer {
+   };
+ }
+ 
+-macro BufferJoin(implicit context: Context)(buffer: Buffer, sep: String):
+-    String {
++transitioning macro BufferJoin(
++    implicit context: Context)(buffer: Buffer, sep: String): String {
+   dcheck(IsValidPositiveSmi(buffer.totalStringLength));
+   if (buffer.totalStringLength == 0) return kEmptyString;
+ 
+@@ -327,14 +329,14 @@ macro BufferJoin(implicit context: Context)(buffer: Buffer, sep: String):
+       // When the element is a string, just return it and completely avoid
+       // allocating another string.
+       case (str: String): {
+-        return str;
++        return TaintArrayJoin(context, str);
+       }
+ 
+       // When the element is a smi, use StringRepeat to quickly build a memory
+       // efficient separator repeated string.
+       case (nofSeparators: Smi): {
+         dcheck(nofSeparators > 0);
+-        return StringRepeat(context, sep, nofSeparators);
++        return TaintArrayJoin(context, StringRepeat(context, sep, nofSeparators));
+       }
+       case (Object): {
+         unreachable;
+diff --git a/src/builtins/base.tq b/src/builtins/base.tq
+index bdcd122eff7..97bcc6a6160 100644
+--- a/src/builtins/base.tq
++++ b/src/builtins/base.tq
+@@ -953,6 +953,7 @@ extern macro LoadFullTagged(RawPtr): Object;
+ extern macro StoreFullTaggedNoWriteBarrier(RawPtr, Object): void;
+ 
+ extern runtime StringEqual(Context, String, String): Oddball;
++extern runtime MarkTaintOperationById(Context, String, Smi): String;
+ extern builtin StringLessThan(String, String): Boolean;
+ extern builtin StringCompare(String, String): Smi;
+ extern macro StringCharCodeAt(String, uintptr): char16;
+diff --git a/src/builtins/builtins-definitions.h b/src/builtins/builtins-definitions.h
+index 8ec77ac91f1..0364f64921b 100644
+--- a/src/builtins/builtins-definitions.h
++++ b/src/builtins/builtins-definitions.h
+@@ -1196,6 +1196,10 @@ constexpr int kGearboxGenericBuiltinIdOffset = -2;
+   CPP(AtomicsPause, kDontAdaptArgumentsSentinel)                               \
+                                                                                \
+   /* String */                                                                 \
++  CPP(StringTainted, kDontAdaptArgumentsSentinel)                              \
++  CPP(StringPrototypeTaintGetter, JSParameterCount(0))                         \
++  CPP(StringPrototypeTaintSetter, JSParameterCount(1))                         \
++  CPP(StringPrototypeUntaint, kDontAdaptArgumentsSentinel)                     \
+   CPP(StringFromCodePoint, kDontAdaptArgumentsSentinel)                        \
+   IF_TSA(TFJ_TSA, TFJ, StringFromCharCode, kDontAdaptArgumentsSentinel)        \
+   CPP(StringPrototypeLastIndexOf, kDontAdaptArgumentsSentinel)                 \
+diff --git a/src/builtins/builtins-function.cc b/src/builtins/builtins-function.cc
+index b511c42836f..3a00fcedea7 100644
+--- a/src/builtins/builtins-function.cc
++++ b/src/builtins/builtins-function.cc
+@@ -2,17 +2,21 @@
+ // Use of this source code is governed by a BSD-style license that can be
+ // found in the LICENSE file.
+ 
++#include <vector>
++
+ #include "src/builtins/builtins-utils-inl.h"
+ #include "src/builtins/builtins.h"
+ #include "src/codegen/code-factory.h"
+ #include "src/codegen/compiler.h"
+ #include "src/handles/handle-scope-implementer-inl.h"
++#include "src/handles/handles-inl.h"
+ #include "src/logging/counters.h"
+ #include "src/numbers/conversions.h"
+ #include "src/objects/api-callbacks.h"
+ #include "src/objects/lookup.h"
+ #include "src/objects/objects-inl.h"
+ #include "src/strings/string-builder-inl.h"
++#include "src/strings/taint.h"
+ 
+ namespace v8 {
+ namespace internal {
+@@ -43,6 +47,8 @@ MaybeDirectHandle<Object> CreateDynamicFunction(Isolate* isolate,
+   // Build the source string.
+   DirectHandle<String> source;
+   int parameters_end_pos = kNoSourcePosition;
++  std::vector<int> tainted_offsets;
++  std::vector<IndirectHandle<String>> tainted_pieces;
+   {
+     IncrementalStringBuilder builder(isolate);
+     builder.AppendCharacter('(');
+@@ -55,7 +61,12 @@ MaybeDirectHandle<Object> CreateDynamicFunction(Isolate* isolate,
+         ASSIGN_RETURN_ON_EXCEPTION(isolate, param,
+                                    Object::ToString(isolate, args.at(i)));
+         param = String::Flatten(isolate, param);
++        int param_offset = builder.Length();
+         builder.AppendString(param);
++        if (param->IsTainted()) {
++          tainted_offsets.push_back(param_offset);
++          tainted_pieces.push_back(indirect_handle(param, isolate));
++        }
+       }
+     }
+     builder.AppendCharacter('\n');
+@@ -65,12 +76,31 @@ MaybeDirectHandle<Object> CreateDynamicFunction(Isolate* isolate,
+       DirectHandle<String> body;
+       ASSIGN_RETURN_ON_EXCEPTION(isolate, body,
+                                  Object::ToString(isolate, args.at(argc)));
++      int body_offset = builder.Length();
+       builder.AppendString(body);
++      if (body->IsTainted()) {
++        tainted_offsets.push_back(body_offset);
++        tainted_pieces.push_back(indirect_handle(body, isolate));
++      }
+     }
+     builder.AppendCStringLiteral("\n})");
+     ASSIGN_RETURN_ON_EXCEPTION(isolate, source, builder.Finish());
+   }
+ 
++  if (!tainted_pieces.empty() && !source.is_null()) {
++    SafeStringTaint source_taint;
++    for (size_t k = 0; k < tainted_pieces.size(); ++k) {
++      source_taint.concat(tainted_pieces[k]->GetTaint(),
++                          static_cast<uint32_t>(tainted_offsets[k]));
++    }
++    source->SetTaint(isolate, source_taint);
++  }
++  DirectHandle<String> function_text =
++      isolate->factory()->NewSubString(source, 1, source->length() - 1);
++  if (ReportTaintSink(isolate, *function_text, "Function.ctor")) {
++    MarkTaintOperation(isolate, *source, "Function.ctor");
++  }
++
+   bool is_code_like = true;
+   for (int i = 0; i < argc; ++i) {
+     if (!Object::IsCodeLike(*args.at(i + 1), isolate)) {
+diff --git a/src/builtins/builtins-global.cc b/src/builtins/builtins-global.cc
+index 89be05c0b3e..ad0d5779eee 100644
+--- a/src/builtins/builtins-global.cc
++++ b/src/builtins/builtins-global.cc
+@@ -8,6 +8,7 @@
+ #include "src/codegen/compiler.h"
+ #include "src/logging/counters.h"
+ #include "src/objects/objects-inl.h"
++#include "src/strings/taint.h"
+ #include "src/strings/uri.h"
+ 
+ namespace v8 {
+@@ -94,6 +95,10 @@ BUILTIN(GlobalEval) {
+   // Run embedder pre-checks before executing eval. If the argument is a
+   // non-String (or other object the embedder doesn't know to handle), then
+   // return it directly.
++  if (IsString(*x)) {
++    ReportTaintSink(isolate, Cast<String>(*x), "eval");
++  }
++
+   MaybeDirectHandle<String> source;
+   bool unhandled_object;
+   std::tie(source, unhandled_object) =
+diff --git a/src/builtins/builtins-intl-gen.cc b/src/builtins/builtins-intl-gen.cc
+index 24acfd55921..1ad42dec24e 100644
+--- a/src/builtins/builtins-intl-gen.cc
++++ b/src/builtins/builtins-intl-gen.cc
+@@ -105,7 +105,19 @@ TF_BUILTIN(StringPrototypeToLowerCaseIntl, IntlBuiltinsAssembler) {
+   TNode<String> string =
+       ToThisString(context, maybe_string, "String.prototype.toLowerCase");
+ 
+-  Return(CallBuiltin(Builtin::kStringToLowerCaseIntl, context, string));
++  TNode<String> result =
++      CAST(CallBuiltin(Builtin::kStringToLowerCaseIntl, context, string));
++  TVARIABLE(String, var_result, result);
++  Label done(this);
++  GotoIf(Word32Equal(
++             LoadObjectField<Uint32T>(string, offsetof(String, taint_)),
++             Uint32Constant(0)),
++         &done);
++  var_result = CAST(CallRuntime(Runtime::kPropagateTaintById, context, string,
++                                result, SmiConstant(3)));
++  Goto(&done);
++  BIND(&done);
++  Return(var_result.value());
+ }
+ 
+ // https://tc39.es/ecma402/#sup-string.prototype.tolocalelowercase
+diff --git a/src/builtins/builtins-intl.cc b/src/builtins/builtins-intl.cc
+index bbfdb2c5505..a2b477e2673 100644
+--- a/src/builtins/builtins-intl.cc
++++ b/src/builtins/builtins-intl.cc
+@@ -16,6 +16,7 @@
+ #include "src/logging/counters.h"
+ #include "src/objects/elements.h"
+ #include "src/objects/intl-objects.h"
++#include "src/strings/taint.h"
+ #include "src/objects/js-array-inl.h"
+ #include "src/objects/js-break-iterator-inl.h"
+ #include "src/objects/js-collator-inl.h"
+@@ -44,7 +45,15 @@ BUILTIN(StringPrototypeToUpperCaseIntl) {
+   HandleScope scope(isolate);
+   TO_THIS_STRING(string, "String.prototype.toUpperCase");
+   string = String::Flatten(isolate, string);
+-  RETURN_RESULT_OR_FAILURE(isolate, Intl::ConvertToUpper(isolate, string));
++  DirectHandle<String> result;
++  ASSIGN_RETURN_FAILURE_ON_EXCEPTION(isolate, result,
++                                     Intl::ConvertToUpper(isolate, string));
++  if (string->IsTainted() && result->length() > 0) {
++    SafeStringTaint taint = string->GetTaint().safeCopy();
++    taint.extend(TaintOperation("toUpperCase"));
++    result->SetTaint(isolate, taint);
++  }
++  return *result;
+ }
+ 
+ // https://tc39.es/ecma262/#sec-string.prototype.normalize
+@@ -55,8 +64,17 @@ BUILTIN(StringPrototypeNormalizeIntl) {
+ 
+   DirectHandle<Object> form_input = args.atOrUndefined(isolate, 1);
+ 
+-  RETURN_RESULT_OR_FAILURE(isolate,
+-                           Intl::Normalize(isolate, string, form_input));
++  if (string->IsTainted()) {
++    string = isolate->factory()->NewProperSubString(string, 0, string->length());
++  }
++  DirectHandle<String> result;
++  ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
++      isolate, result, Intl::Normalize(isolate, string, form_input));
++  if (string->IsTainted()) {
++    PropagateTaint(isolate, *string, *result, "normalize",
++                   {TaintStringToU16(*string)});
++  }
++  return *result;
+ }
+ 
+ // https://tc39.es/ecma402/#sup-properties-of-the-string-prototype-object
+diff --git a/src/builtins/builtins-iterator-gen.cc b/src/builtins/builtins-iterator-gen.cc
+index 3de7f820ee7..9ceddd2018b 100644
+--- a/src/builtins/builtins-iterator-gen.cc
++++ b/src/builtins/builtins-iterator-gen.cc
+@@ -452,15 +452,24 @@ void IteratorBuiltinsAssembler::FastIterableToList(
+ 
+     BIND(&if_fast);
+     {
++      Label if_tainted(this, Label::kDeferred);
+       const TNode<Uint32T> length = LoadStringLengthAsWord32(CAST(iterable));
+       // Use string length as conservative approximation of number of
+       // codepoints.
+       GotoIf(Uint32GreaterThan(length,
+                                Uint32Constant(JSArray::kMaxFastArrayLength)),
+              slow);
++      const TNode<Uint32T> string_taint =
++          LoadObjectField<Uint32T>(iterable, offsetof(String, taint_));
++      GotoIf(Word32NotEqual(string_taint, Uint32Constant(0)), &if_tainted);
+       *var_result =
+           CAST(CallBuiltin(Builtin::kStringToList, context, iterable));
+       Goto(&done);
++
++      BIND(&if_tainted);
++      *var_result =
++          CAST(CallRuntime(Runtime::kTaintStringToList, context, iterable));
++      Goto(&done);
+     }
+ 
+     BIND(&check_next);
+diff --git a/src/builtins/builtins-string-gen.cc b/src/builtins/builtins-string-gen.cc
+index 6168b340edc..447ec1de920 100644
+--- a/src/builtins/builtins-string-gen.cc
++++ b/src/builtins/builtins-string-gen.cc
+@@ -478,6 +478,8 @@ TNode<String> StringBuiltinsAssembler::AllocateConsString(TNode<Uint32T> length,
+                                  first.value());
+   StoreObjectFieldNoWriteBarrier(result, offsetof(ConsString, second_),
+                                  second.value());
++  StoreObjectFieldNoWriteBarrier(result, offsetof(String, taint_),
++                                 Uint32Constant(0));
+   return CAST(result);
+ }
+ 
+@@ -505,6 +507,16 @@ TNode<String> StringBuiltinsAssembler::StringAdd(
+ 
+   BIND(&cons);
+   {
++    {
++      TNode<Uint32T> left_taint =
++          LoadObjectField<Uint32T>(left, offsetof(String, taint_));
++      TNode<Uint32T> right_taint =
++          LoadObjectField<Uint32T>(right, offsetof(String, taint_));
++      GotoIf(Word32NotEqual(Word32Or(left_taint, right_taint),
++                            Uint32Constant(0)),
++             &runtime);
++    }
++
+     TNode<Uint32T> new_length = Uint32Add(left_length, right_length);
+ 
+     // If new length is greater than String::kMaxLength, goto runtime to
+@@ -1290,8 +1302,10 @@ TF_BUILTIN(StringPrototypeReplace, StringBuiltinsAssembler) {
+     Label next(this);
+ 
+     auto if_regexp_call = [=, this] {
+-      Return(CallBuiltin(Builtin::kRegExpReplace, context, search, receiver,
+-                         replace));
++      const TNode<Object> result = CallBuiltin(
++          Builtin::kRegExpReplace, context, search, receiver, replace);
++      Return(CallRuntime(Runtime::kMarkTaintOperationById, context, result,
++                         SmiConstant(10)));
+     };
+     auto if_generic_call = [=, this](TNode<Object> fn) {
+       Return(Call(context, fn, search, receiver, replace));
+@@ -1338,8 +1352,11 @@ TF_BUILTIN(StringPrototypeReplace, StringBuiltinsAssembler) {
+     // replaced by a simple string and only pays off for long strings.
+     // TODO(jgruber): Reevaluate if this is still beneficial.
+     // TODO(jgruber): TailCallRuntime when it correctly handles adapter frames.
+-    Return(CallRuntime(Runtime::kStringReplaceOneCharWithString, context,
+-                       subject_string, search_string, replace_string));
++    const TNode<Object> replaced =
++        CallRuntime(Runtime::kStringReplaceOneCharWithString, context,
++                    subject_string, search_string, replace_string);
++    Return(CallRuntime(Runtime::kMarkTaintOperationById, context, replaced,
++                       SmiConstant(10)));
+ 
+     BIND(&next);
+   }
+@@ -1371,7 +1388,8 @@ TF_BUILTIN(StringPrototypeReplace, StringBuiltinsAssembler) {
+     Goto(&return_subject);
+ 
+     BIND(&return_subject);
+-    Return(subject_string);
++    Return(CallRuntime(Runtime::kMarkTaintOperationById, context,
++                       subject_string, SmiConstant(10)));
+ 
+     BIND(&next);
+   }
+@@ -1430,9 +1448,10 @@ TF_BUILTIN(StringPrototypeReplace, StringBuiltinsAssembler) {
+     const TNode<Object> suffix =
+         CallBuiltin(Builtin::kStringSubstring, context, subject_string,
+                     SmiUntag(match_end_index), subject_length);
+-    const TNode<Object> result = CallBuiltin(
+-        Builtin::kStringAdd_NoMapCheck, context, var_result.value(), suffix);
+-    Return(result);
++    const TNode<String> result = CAST(CallBuiltin(
++        Builtin::kStringAdd_NoMapCheck, context, var_result.value(), suffix));
++    Return(CallRuntime(Runtime::kMarkTaintOperationById, context, result,
++                       SmiConstant(10)));
+   }
+ }
+ 
+@@ -1558,6 +1577,12 @@ TNode<JSArray> StringBuiltinsAssembler::StringToArray(
+   TNode<Uint16T> instance_type = LoadInstanceType(subject_string);
+   GotoIfNot(IsOneByteStringInstanceType(instance_type), &call_runtime);
+ 
++  {
++    TNode<Uint32T> subject_taint =
++        LoadObjectField<Uint32T>(subject_string, offsetof(String, taint_));
++    GotoIf(Word32NotEqual(subject_taint, Uint32Constant(0)), &call_runtime);
++  }
++
+   // Try to use cached one byte characters.
+   {
+     TNode<Smi> length_smi = Select<Smi>(
+@@ -1992,6 +2017,12 @@ TNode<String> StringBuiltinsAssembler::AllocAndCopyStringCharacters(
+     }
+   };
+ 
++  if constexpr (std::is_same_v<T, String>) {
++    TNode<Uint32T> from_taint =
++        LoadObjectField<Uint32T>(from, offsetof(String, taint_));
++    GotoIf(Word32NotEqual(from_taint, Uint32Constant(0)), if_bailout);
++  }
++
+   Branch(from_is_one_byte, &one_byte_sequential, &two_byte_sequential);
+ 
+   // The subject string is a sequential one-byte string.
+@@ -2123,6 +2154,12 @@ TNode<String> StringBuiltinsAssembler::SubString(TNode<String> string,
+   Label empty(this);
+   GotoIf(IntPtrEqual(substr_length, IntPtrConstant(0)), &empty);
+ 
++  {
++    TNode<Uint32T> subject_taint =
++        LoadObjectField<Uint32T>(string, offsetof(String, taint_));
++    GotoIf(Word32NotEqual(subject_taint, Uint32Constant(0)), &runtime);
++  }
++
+   Label single_char(this);
+   GotoIf(IntPtrEqual(substr_length, IntPtrConstant(1)), &single_char);
+ 
+diff --git a/src/builtins/builtins-string-tsa-inl.h b/src/builtins/builtins-string-tsa-inl.h
+index c8ded617619..5cc72f27ac4 100644
+--- a/src/builtins/builtins-string-tsa-inl.h
++++ b/src/builtins/builtins-string-tsa-inl.h
+@@ -92,6 +92,9 @@ class StringBuiltinsReducer : public Next {
+     __ InitializeField(new_string, AccessBuilderTS::ForNameRawHashField(),
+                        Name::kEmptyHashField);
+     V<SeqOneByteString> string = __ FinishInitialization(std::move(new_string));
++    __ Store(string, __ Word32Constant(0), StoreOp::Kind::TaggedBase(),
++             MemoryRepresentation::Uint32(), compiler::kNoWriteBarrier,
++             offsetof(String, taint_));
+     // Clear padding.
+     V<WordPtr> raw_padding_begin = __ WordPtrAdd(
+         __ WordPtrAdd(__ BitcastTaggedToWordPtr(string), aligned_size),
+@@ -128,6 +131,9 @@ class StringBuiltinsReducer : public Next {
+     __ InitializeField(new_string, AccessBuilderTS::ForNameRawHashField(),
+                        Name::kEmptyHashField);
+     V<SeqTwoByteString> string = __ FinishInitialization(std::move(new_string));
++    __ Store(string, __ Word32Constant(0), StoreOp::Kind::TaggedBase(),
++             MemoryRepresentation::Uint32(), compiler::kNoWriteBarrier,
++             offsetof(String, taint_));
+     // Clear padding.
+     V<WordPtr> raw_padding_begin = __ WordPtrAdd(
+         __ WordPtrAdd(__ BitcastTaggedToWordPtr(string), aligned_size),
+diff --git a/src/builtins/builtins-string.cc b/src/builtins/builtins-string.cc
+index ccb5ca65560..1caa4a8f4cf 100644
+--- a/src/builtins/builtins-string.cc
++++ b/src/builtins/builtins-string.cc
+@@ -16,6 +16,7 @@
+ #include "src/regexp/regexp-utils.h"
+ #include "src/strings/string-builder-inl.h"
+ #include "src/strings/string-case.h"
++#include "src/strings/taint.h"
+ #include "src/strings/unicode-inl.h"
+ #include "src/strings/unicode.h"
+ 
+@@ -59,6 +60,238 @@ base::uc32 NextCodePoint(Isolate* isolate, BuiltinArguments args, int index) {
+ }  // namespace
+ 
+ // https://tc39.es/ecma262/#sec-string.fromcodepoint
++static Handle<String> TaintU16ToJSString(Isolate* isolate,
++                                         const std::u16string& s) {
++  if (s.empty()) return isolate->factory()->empty_string();
++  return isolate->factory()
++      ->NewStringFromTwoByte(base::Vector<const base::uc16>(
++          reinterpret_cast<const base::uc16*>(s.data()),
++          static_cast<int>(s.size())))
++      .ToHandleChecked();
++}
++
++BUILTIN(StringTainted) {
++  HandleScope scope(isolate);
++  Factory* factory = isolate->factory();
++
++  Handle<String> input;
++  ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
++      isolate, input,
++      Object::ToString(isolate, args.atOrUndefined(isolate, 1)));
++  uint32_t length = input->length();
++  if (length == 0) return *input;
++
++  DirectHandle<String> flat = String::Flatten(isolate, input);
++
++  std::string source = "manual taint source";
++  Handle<Object> source_arg = args.atOrUndefined(isolate, 2);
++  if (!IsUndefined(*source_arg)) {
++    Handle<String> source_str;
++    ASSIGN_RETURN_FAILURE_ON_EXCEPTION(isolate, source_str,
++                                       Object::ToString(isolate, source_arg));
++    if (source_str->length() > 0) {
++      source = std::string(source_str->ToCString().get());
++    }
++  }
++
++  Handle<String> result;
++  if (flat->IsOneByteRepresentation()) {
++    Handle<SeqOneByteString> seq;
++    ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
++        isolate, seq, factory->NewRawOneByteString(static_cast<int>(length)));
++    DisallowGarbageCollection no_gc;
++    String::FlatContent content = flat->GetFlatContent(no_gc);
++    CopyChars(seq->GetChars(no_gc), content.ToOneByteVector().data(), length);
++    result = seq;
++  } else {
++    Handle<SeqTwoByteString> seq;
++    ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
++        isolate, seq, factory->NewRawTwoByteString(static_cast<int>(length)));
++    DisallowGarbageCollection no_gc;
++    String::FlatContent content = flat->GetFlatContent(no_gc);
++    CopyChars(seq->GetChars(no_gc), content.ToUC16Vector().data(), length);
++    result = seq;
++  }
++
++  std::vector<std::u16string> arguments;
++  arguments.push_back(TaintStringToU16(*result));
++  for (int i = 3; i < args.length(); i++) {
++    Handle<String> extra;
++    ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
++        isolate, extra,
++        Object::ToString(isolate, args.atOrUndefined(isolate, i)));
++    arguments.push_back(TaintStringToU16(*extra));
++  }
++
++  MarkTaintSource(isolate, *result, source.c_str(), std::move(arguments));
++  return *result;
++}
++
++BUILTIN(StringPrototypeTaintGetter) {
++  HandleScope scope(isolate);
++  Factory* factory = isolate->factory();
++
++  Handle<String> str;
++  ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
++      isolate, str, Object::ToString(isolate, args.receiver()));
++
++  PropertyAttributes attrs =
++      static_cast<PropertyAttributes>(READ_ONLY | DONT_DELETE);
++
++  const StringTaint& taint = str->GetTaint();
++
++  std::vector<Handle<Object>> range_objs;
++  for (const TaintRange& range : taint) {
++    Handle<JSObject> range_obj =
++        factory->NewJSObject(isolate->object_function());
++    JSObject::AddProperty(isolate, range_obj,
++                          factory->InternalizeUtf8String("begin"),
++                          factory->NewNumberFromUint(range.begin()), attrs);
++    JSObject::AddProperty(isolate, range_obj,
++                          factory->InternalizeUtf8String("end"),
++                          factory->NewNumberFromUint(range.end()), attrs);
++
++    std::vector<Handle<Object>> node_objs;
++    for (TaintNode& node : range.flow()) {
++      const TaintOperation& op = node.operation();
++      Handle<JSObject> node_obj =
++          factory->NewJSObject(isolate->object_function());
++
++      Handle<String> op_name =
++          factory->NewStringFromUtf8(base::CStrVector(op.name()))
++              .ToHandleChecked();
++      JSObject::AddProperty(isolate, node_obj,
++                            factory->InternalizeUtf8String("operation"),
++                            op_name, attrs);
++
++      DirectHandle<Object> is_source(
++          op.isSource() ? Tagged<Object>(ReadOnlyRoots(isolate).true_value())
++                        : Tagged<Object>(ReadOnlyRoots(isolate).false_value()),
++          isolate);
++      JSObject::AddProperty(isolate, node_obj,
++                            factory->InternalizeUtf8String("source"), is_source,
++                            attrs);
++
++      const TaintLocation& loc = op.location();
++      Handle<JSObject> loc_obj =
++          factory->NewJSObject(isolate->object_function());
++      JSObject::AddProperty(isolate, loc_obj,
++                            factory->InternalizeUtf8String("filename"),
++                            TaintU16ToJSString(isolate, loc.filename()), attrs);
++      JSObject::AddProperty(isolate, loc_obj,
++                            factory->InternalizeUtf8String("function"),
++                            TaintU16ToJSString(isolate, loc.function()), attrs);
++      JSObject::AddProperty(isolate, loc_obj,
++                            factory->InternalizeUtf8String("line"),
++                            factory->NewNumberFromUint(loc.line()), attrs);
++      JSObject::AddProperty(isolate, loc_obj,
++                            factory->InternalizeUtf8String("pos"),
++                            factory->NewNumberFromUint(loc.pos()), attrs);
++      JSObject::AddProperty(isolate, loc_obj,
++                            factory->InternalizeUtf8String("next_line"),
++                            factory->NewNumberFromUint(loc.next_line()), attrs);
++      JSObject::AddProperty(isolate, loc_obj,
++                            factory->InternalizeUtf8String("next_pos"),
++                            factory->NewNumberFromUint(loc.next_pos()), attrs);
++      JSObject::AddProperty(
++          isolate, loc_obj, factory->InternalizeUtf8String("scriptline"),
++          factory->NewNumberFromUint(loc.scriptStartLine()), attrs);
++      JSObject::AddProperty(isolate, node_obj,
++                            factory->InternalizeUtf8String("location"), loc_obj,
++                            attrs);
++
++      const std::vector<std::u16string>& op_args = op.arguments();
++      Handle<FixedArray> arg_elems =
++          factory->NewFixedArray(static_cast<int>(op_args.size()));
++      for (size_t k = 0; k < op_args.size(); k++) {
++        DirectHandle<String> arg = TaintU16ToJSString(isolate, op_args[k]);
++        arg_elems->set(static_cast<int>(k), *arg);
++      }
++      Handle<JSArray> arg_array =
++          factory->NewJSArrayWithElements(arg_elems, PACKED_ELEMENTS);
++      JSObject::AddProperty(isolate, node_obj,
++                            factory->InternalizeUtf8String("arguments"),
++                            arg_array, attrs);
++
++      node_objs.push_back(node_obj);
++    }
++
++    Handle<FixedArray> flow_elems =
++        factory->NewFixedArray(static_cast<int>(node_objs.size()));
++    for (size_t j = 0; j < node_objs.size(); j++) {
++      flow_elems->set(static_cast<int>(j), *node_objs[j]);
++    }
++    Handle<JSArray> flow_array =
++        factory->NewJSArrayWithElements(flow_elems, PACKED_ELEMENTS);
++    JSObject::AddProperty(isolate, range_obj,
++                          factory->InternalizeUtf8String("flow"), flow_array,
++                          attrs);
++
++    range_objs.push_back(range_obj);
++  }
++
++  Handle<FixedArray> range_elems =
++      factory->NewFixedArray(static_cast<int>(range_objs.size()));
++  for (size_t i = 0; i < range_objs.size(); i++) {
++    range_elems->set(static_cast<int>(i), *range_objs[i]);
++  }
++  return *factory->NewJSArrayWithElements(range_elems, PACKED_ELEMENTS);
++}
++
++BUILTIN(StringPrototypeUntaint) {
++  HandleScope scope(isolate);
++  Handle<String> str;
++  ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
++      isolate, str, Object::ToString(isolate, args.receiver()));
++  str->ClearTaint(isolate);
++  return *str;
++}
++
++BUILTIN(StringPrototypeTaintSetter) {
++  HandleScope scope(isolate);
++  Handle<String> str;
++  ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
++      isolate, str, Object::ToString(isolate, args.receiver()));
++  Handle<Object> value = args.atOrUndefined(isolate, 1);
++  StringTaint taint;
++  if (IsJSReceiver(*value)) {
++    Handle<JSReceiver> arr = Cast<JSReceiver>(value);
++    DirectHandle<Object> len_obj;
++    ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
++        isolate, len_obj, Object::GetLengthFromArrayLike(isolate, arr));
++    double len_d = Object::NumberValue(Cast<Number>(*len_obj));
++    uint32_t len = 0;
++    if (len_d > 0 && len_d < static_cast<double>(String::kMaxLength)) {
++      len = static_cast<uint32_t>(len_d);
++    }
++    Handle<String> begin_name =
++        isolate->factory()->NewStringFromAsciiChecked("begin");
++    Handle<String> end_name =
++        isolate->factory()->NewStringFromAsciiChecked("end");
++    for (uint32_t i = 0; i < len; i++) {
++      Handle<Object> elem;
++      ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
++          isolate, elem, JSReceiver::GetElement(isolate, arr, i));
++      if (!IsJSReceiver(*elem)) continue;
++      DirectHandle<JSReceiver> elem_recv = Cast<JSReceiver>(elem);
++      DirectHandle<Object> b, e;
++      ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
++          isolate, b, Object::GetProperty(isolate, elem_recv, begin_name));
++      ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
++          isolate, e, Object::GetProperty(isolate, elem_recv, end_name));
++      if (!IsNumber(*b) || !IsNumber(*e)) continue;
++      double bd = Object::NumberValue(Cast<Number>(*b));
++      double ed = Object::NumberValue(Cast<Number>(*e));
++      if (bd >= 0 && ed > bd && ed <= str->length()) {
++        taint.overlay(static_cast<uint32_t>(bd), static_cast<uint32_t>(ed),
++                      TaintOperation("taint setter"));
++      }
++    }
++  }
++  str->SetTaint(isolate, taint);
++  return ReadOnlyRoots(isolate).undefined_value();
++}
++
+ BUILTIN(StringFromCodePoint) {
+   HandleScope scope(isolate);
+   int const length = args.length() - 1;
+@@ -375,7 +608,10 @@ V8_WARN_UNUSED_RESULT static Tagged<Object> ConvertCase(
+             length - prefix) +
+         prefix;
+     // If not ASCII, we discard the result and take the 2 byte path.
+-    if (index_to_first_unprocessed == length) return *result;
++    if (index_to_first_unprocessed == length) {
++      PropagateTaint(isolate, *s, *result, "toCase");
++      return *result;
++    }
+   }
+ 
+   DirectHandle<SeqString> result;  // Same length as input.
+@@ -402,7 +638,12 @@ V8_WARN_UNUSED_RESULT static Tagged<Object> ConvertCase(
+     ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
+         isolate, result, isolate->factory()->NewRawTwoByteString(length));
+   }
+-  return ConvertCaseHelper(isolate, *s, *result, length, mapping);
++  Tagged<Object> converted =
++      ConvertCaseHelper(isolate, *s, *result, length, mapping);
++  if (IsString(converted)) {
++    PropagateTaint(isolate, *s, Cast<String>(converted), "toCase");
++  }
++  return converted;
+ }
+ 
+ }  // namespace
+diff --git a/src/builtins/builtins-string.tq b/src/builtins/builtins-string.tq
+index 7bc2bde0c7b..cb5be656143 100644
+--- a/src/builtins/builtins-string.tq
++++ b/src/builtins/builtins-string.tq
+@@ -166,8 +166,8 @@ transitioning javascript builtin StringPrototypeCharAt(
+     GenerateStringAt(receiver, position, 'String.prototype.charAt')
+         otherwise IfInBounds, IfOutOfBounds;
+   } label IfInBounds(string: String, index: uintptr, _length: uintptr) {
+-    const code: char16 = StringCharCodeAt(string, index);
+-    return StringFromSingleCharCode(code);
++    return MarkTaintOperationById(
++        context, SubString(string, index, index + 1), SmiConstant(11));
+   } label IfOutOfBounds {
+     return kEmptyString;
+   }
+diff --git a/src/builtins/string-iterator.tq b/src/builtins/string-iterator.tq
+index 1609d6e60f5..a90d02fe9b1 100644
+--- a/src/builtins/string-iterator.tq
++++ b/src/builtins/string-iterator.tq
+@@ -40,8 +40,11 @@ transitioning javascript builtin StringIteratorPrototypeNext(
+   // Move to next codepoint.
+   const encoding = UnicodeEncoding::UTF16;
+   const ch = string::LoadSurrogatePairAt(string, length, position, encoding);
+-  const value: String = string::StringFromSingleUTF16EncodedCodePoint(ch);
+-  iterator.index = SmiTag(position + value.length_intptr);
++  const codePoint: String = string::StringFromSingleUTF16EncodedCodePoint(ch);
++  const charCount: intptr = codePoint.length_intptr;
++  const value: String =
++      SubString(string, Unsigned(position), Unsigned(position + charCount));
++  iterator.index = SmiTag(position + charCount);
+   return AllocateJSIteratorResult(value, False);
+ }
+ }
+diff --git a/src/builtins/string-repeat.tq b/src/builtins/string-repeat.tq
+index 2335157d872..e61cfd85177 100644
+--- a/src/builtins/string-repeat.tq
++++ b/src/builtins/string-repeat.tq
+@@ -48,7 +48,7 @@ transitioning javascript builtin StringPrototypeRepeat(
+ 
+         // 7. Return the String value that is made from n copies of S appended
+         // together.
+-        return StringRepeat(s, n);
++        return MarkTaintOperationById(context, StringRepeat(s, n), SmiConstant(1));
+       }
+       case (heapNum: HeapNumber): deferred {
+         dcheck(IsNumberNormalized(heapNum));
+diff --git a/src/builtins/string-slice.tq b/src/builtins/string-slice.tq
+index f81ccdb63e0..72942a688a8 100644
+--- a/src/builtins/string-slice.tq
++++ b/src/builtins/string-slice.tq
+@@ -30,6 +30,7 @@ transitioning javascript builtin StringPrototypeSlice(
+     return kEmptyString;
+   }
+ 
+-  return SubString(string, start, end);
++  return MarkTaintOperationById(
++      context, SubString(string, start, end), SmiConstant(9));
+ }
+ }
+diff --git a/src/builtins/string-substr.tq b/src/builtins/string-substr.tq
+index a88e8edc392..bd952156ef0 100644
+--- a/src/builtins/string-substr.tq
++++ b/src/builtins/string-substr.tq
+@@ -38,6 +38,8 @@ transitioning javascript builtin StringPrototypeSubstr(
+ 
+   // 9. Return the String value containing resultLength consecutive code units
+   // from S beginning with the code unit at index intStart.
+-  return SubString(string, initStart, initStart + resultLength);
++  return MarkTaintOperationById(
++      context, SubString(string, initStart, initStart + resultLength),
++      SmiConstant(0));
+ }
+ }
+diff --git a/src/builtins/string-substring.tq b/src/builtins/string-substring.tq
+index a3a9a00c372..05350960523 100644
+--- a/src/builtins/string-substring.tq
++++ b/src/builtins/string-substring.tq
+@@ -25,6 +25,7 @@ transitioning javascript builtin StringPrototypeSubstring(
+     end = start;
+     start = tmp;
+   }
+-  return SubString(string, start, end);
++  return MarkTaintOperationById(
++      context, SubString(string, start, end), SmiConstant(8));
+ }
+ }
+diff --git a/src/builtins/string-trim.tq b/src/builtins/string-trim.tq
+index 3d1b7dfaeaf..f9d0006ad16 100644
+--- a/src/builtins/string-trim.tq
++++ b/src/builtins/string-trim.tq
+@@ -153,7 +153,9 @@ transitioning javascript builtin StringPrototypeTrim(
+     js-implicit context: NativeContext, receiver: JSAny)(
+     ...arguments): String {
+   const methodName: constexpr string = 'String.prototype.trim';
+-  return StringTrim(receiver, arguments, methodName, TrimMode::kTrim);
++  return MarkTaintOperationById(
++      context, StringTrim(receiver, arguments, methodName, TrimMode::kTrim),
++      SmiConstant(5));
+ }
+ 
+ // https://github.com/tc39/proposal-string-left-right-trim
+@@ -161,7 +163,10 @@ transitioning javascript builtin StringPrototypeTrimStart(
+     js-implicit context: NativeContext, receiver: JSAny)(
+     ...arguments): String {
+   const methodName: constexpr string = 'String.prototype.trimLeft';
+-  return StringTrim(receiver, arguments, methodName, TrimMode::kTrimStart);
++  return MarkTaintOperationById(
++      context,
++      StringTrim(receiver, arguments, methodName, TrimMode::kTrimStart),
++      SmiConstant(6));
+ }
+ 
+ // https://github.com/tc39/proposal-string-left-right-trim
+@@ -169,6 +174,8 @@ transitioning javascript builtin StringPrototypeTrimEnd(
+     js-implicit context: NativeContext, receiver: JSAny)(
+     ...arguments): String {
+   const methodName: constexpr string = 'String.prototype.trimRight';
+-  return StringTrim(receiver, arguments, methodName, TrimMode::kTrimEnd);
++  return MarkTaintOperationById(
++      context, StringTrim(receiver, arguments, methodName, TrimMode::kTrimEnd),
++      SmiConstant(7));
+ }
+ }
+diff --git a/src/codegen/code-stub-assembler.cc b/src/codegen/code-stub-assembler.cc
+index 50551c7dfeb..e01b7de5fe8 100644
+--- a/src/codegen/code-stub-assembler.cc
++++ b/src/codegen/code-stub-assembler.cc
+@@ -4862,6 +4862,8 @@ TNode<String> CodeStubAssembler::AllocateSeqOneByteString(
+   StoreObjectFieldNoWriteBarrier(result,
+                                  offsetof(SeqOneByteString, raw_hash_field_),
+                                  Int32Constant(String::kEmptyHashField));
++  StoreObjectFieldNoWriteBarrier(result, offsetof(String, taint_),
++                                 Uint32Constant(0));
+   return CAST(result);
+ }
+ // LINT.ThenChange(/src/builtins/builtins-string-tsa-inl.h)
+@@ -4896,6 +4898,8 @@ TNode<String> CodeStubAssembler::AllocateSeqTwoByteString(
+   StoreObjectFieldNoWriteBarrier(result,
+                                  offsetof(SeqTwoByteString, raw_hash_field_),
+                                  Int32Constant(String::kEmptyHashField));
++  StoreObjectFieldNoWriteBarrier(result, offsetof(String, taint_),
++                                 Uint32Constant(0));
+   return CAST(result);
+ }
+ // LINT.ThenChange(/src/builtins/builtins-string-tsa-inl.h)
+@@ -4918,6 +4922,8 @@ TNode<String> CodeStubAssembler::AllocateSlicedString(RootIndex map_root_index,
+                                  parent);
+   StoreObjectFieldNoWriteBarrier(result, offsetof(SlicedString, offset_),
+                                  offset);
++  StoreObjectFieldNoWriteBarrier(result, offsetof(String, taint_),
++                                 Uint32Constant(0));
+   return CAST(result);
+ }
+ 
+diff --git a/src/codegen/compiler.cc b/src/codegen/compiler.cc
+index 3ea55c5c52a..cf044e9cabf 100644
+--- a/src/codegen/compiler.cc
++++ b/src/codegen/compiler.cc
+@@ -58,6 +58,7 @@
+ #include "src/objects/objects.h"
+ #include "src/objects/shared-function-info.h"
+ #include "src/objects/string.h"
++#include "src/strings/taint.h"
+ #include "src/parsing/parse-info.h"
+ #include "src/parsing/parser.h"
+ #include "src/parsing/parsing.h"
+diff --git a/src/compiler/access-builder.cc b/src/compiler/access-builder.cc
+index ad4c9149188..f28ad6c1fc3 100644
+--- a/src/compiler/access-builder.cc
++++ b/src/compiler/access-builder.cc
+@@ -1051,6 +1051,23 @@ FieldAccess AccessBuilder::ForStringLength() {
+   return access;
+ }
+ 
++FieldAccess AccessBuilder::ForStringTaint() {
++  FieldAccess access = {
++      kTaggedBase,
++      offsetof(String, taint_),
++      Handle<Name>(),
++      OptionalMapRef(),
++      Type::ExternalPointer(),
++      MachineType::Pointer(),
++      kNoWriteBarrier,
++      "StringTaint",
++      ConstFieldInfo::None(),
++      false,
++      kStringTaintTag,
++  };
++  return access;
++}
++
+ // static
+ FieldAccess AccessBuilder::ForConsStringFirst() {
+   FieldAccess access = {kTaggedBase,          offsetof(ConsString, first_),
+diff --git a/src/compiler/access-builder.h b/src/compiler/access-builder.h
+index 1f2a422d719..da528749e68 100644
+--- a/src/compiler/access-builder.h
++++ b/src/compiler/access-builder.h
+@@ -294,6 +294,8 @@ class V8_EXPORT_PRIVATE AccessBuilder final
+   // Provides access to String::length() field.
+   static FieldAccess ForStringLength();
+ 
++  static FieldAccess ForStringTaint();
++
+   // Provides access to ConsString::first() field.
+   static FieldAccess ForConsStringFirst();
+ 
+diff --git a/src/compiler/js-call-reducer.cc b/src/compiler/js-call-reducer.cc
+index e8707261d3e..8400ebfc248 100644
+--- a/src/compiler/js-call-reducer.cc
++++ b/src/compiler/js-call-reducer.cc
+@@ -6242,6 +6242,7 @@ Reduction JSCallReducer::ReduceStringPrototypeIndexOfIncludes(
+ 
+ // https://tc39.es/ecma262/#sec-string.prototype.substring
+ Reduction JSCallReducer::ReduceStringPrototypeSubstring(Node* node) {
++  if (v8_flags.taint_disable_jit_string_inlining) return NoChange();
+   JSCallNode n(node);
+   CallParameters const& p = n.Parameters();
+   if (n.ArgumentCount() < 1) return NoChange();
+@@ -6256,6 +6257,7 @@ Reduction JSCallReducer::ReduceStringPrototypeSubstring(Node* node) {
+ 
+ // https://tc39.es/ecma262/#sec-string.prototype.slice
+ Reduction JSCallReducer::ReduceStringPrototypeSlice(Node* node) {
++  if (v8_flags.taint_disable_jit_string_inlining) return NoChange();
+   JSCallNode n(node);
+   CallParameters const& p = n.Parameters();
+   if (n.ArgumentCount() < 1) return NoChange();
+@@ -6270,6 +6272,7 @@ Reduction JSCallReducer::ReduceStringPrototypeSlice(Node* node) {
+ 
+ // https://tc39.es/ecma262/#sec-string.prototype.substr
+ Reduction JSCallReducer::ReduceStringPrototypeSubstr(Node* node) {
++  if (v8_flags.taint_disable_jit_string_inlining) return NoChange();
+   JSCallNode n(node);
+   CallParameters const& p = n.Parameters();
+   if (n.ArgumentCount() < 1) return NoChange();
+@@ -7767,6 +7770,7 @@ Reduction JSCallReducer::ReduceStringPrototypeEndsWith(Node* node) {
+ 
+ // ES section 21.1.3.1 String.prototype.charAt ( pos )
+ Reduction JSCallReducer::ReduceStringPrototypeCharAt(Node* node) {
++  if (v8_flags.taint_disable_jit_string_inlining) return NoChange();
+   JSCallNode n(node);
+   CallParameters const& p = n.Parameters();
+   if (p.speculation_mode() != SpeculationMode::kAllowSpeculation &&
+@@ -7808,6 +7812,7 @@ Reduction JSCallReducer::ReduceStringPrototypeCharAt(Node* node) {
+ #ifdef V8_INTL_SUPPORT
+ 
+ Reduction JSCallReducer::ReduceStringPrototypeToLowerCaseIntl(Node* node) {
++  if (v8_flags.taint_disable_jit_string_inlining) return NoChange();
+   JSCallNode n(node);
+   CallParameters const& p = n.Parameters();
+   if (p.speculation_mode() != SpeculationMode::kAllowSpeculation) {
+@@ -7830,6 +7835,7 @@ Reduction JSCallReducer::ReduceStringPrototypeToLowerCaseIntl(Node* node) {
+ }
+ 
+ Reduction JSCallReducer::ReduceStringPrototypeToUpperCaseIntl(Node* node) {
++  if (v8_flags.taint_disable_jit_string_inlining) return NoChange();
+   JSCallNode n(node);
+   CallParameters const& p = n.Parameters();
+   if (p.speculation_mode() != SpeculationMode::kAllowSpeculation) {
+diff --git a/src/compiler/js-native-context-specialization.cc b/src/compiler/js-native-context-specialization.cc
+index f2c5046a7b6..c476a65fb85 100644
+--- a/src/compiler/js-native-context-specialization.cc
++++ b/src/compiler/js-native-context-specialization.cc
+@@ -389,6 +389,11 @@ Reduction JSNativeContextSpecialization::ReduceJSAdd(Node* node) {
+     Handle<String> right =
+         broker()->CanonicalPersistentHandle(CreateStringConstant(rhs));
+ 
++    bool has_tainted_operand = left->IsTainted() || right->IsTainted();
++    if (has_tainted_operand) {
++      return NoChange();
++    }
++
+     if (!(StringCanSafelyBeRead(lhs, left) &&
+           StringCanSafelyBeRead(rhs, right))) {
+       // One of {lhs} or {rhs} is not safe to be read in the background.
+@@ -2345,6 +2350,7 @@ Reduction JSNativeContextSpecialization::ReduceJSDefineNamedOwnProperty(
+ 
+ Reduction JSNativeContextSpecialization::ReduceElementAccessOnString(
+     Node* node, Node* index, Node* value, KeyedAccessMode const& keyed_mode) {
++  if (v8_flags.taint_disable_jit_string_inlining) return NoChange();
+   Node* receiver = NodeProperties::GetValueInput(node, 0);
+   Node* effect = NodeProperties::GetEffectInput(node);
+   Node* control = NodeProperties::GetControlInput(node);
+diff --git a/src/compiler/js-typed-lowering.cc b/src/compiler/js-typed-lowering.cc
+index 4b0e999c362..79a60a7b9e5 100644
+--- a/src/compiler/js-typed-lowering.cc
++++ b/src/compiler/js-typed-lowering.cc
+@@ -699,10 +699,19 @@ Reduction JSTypedLowering::GenerateStringAddition(
+         graph()->NewNode(common()->TypeGuard(type_cache_->kStringLengthType),
+                          length, *effect, *control);
+   }
++  auto is_tainted_string_constant = [this](Node* n) -> bool {
++    HeapObjectMatcher m(n);
++    if (!m.HasResolvedValue()) return false;
++    HeapObjectRef ref = m.Ref(broker());
++    if (!ref.IsString()) return false;
++    return ref.AsString().object()->IsTainted();
++  };
++  bool operand_tainted =
++      is_tainted_string_constant(left) || is_tainted_string_constant(right);
+   // TODO(bmeurer): Ideally this should always use StringConcat and decide to
+   // optimize to NewConsString later during SimplifiedLowering, but for that
+   // to work we need to know that it's safe to create a ConsString.
+-  Operator const* const op = should_create_cons_string
++  Operator const* const op = (should_create_cons_string && !operand_tainted)
+                                  ? simplified()->NewConsString()
+                                  : simplified()->StringConcat();
+   Node* value = graph()->NewNode(op, length, left, right);
+diff --git a/src/compiler/turboshaft/machine-lowering-reducer-inl.h b/src/compiler/turboshaft/machine-lowering-reducer-inl.h
+index 19f0f012b05..81ae91e619a 100644
+--- a/src/compiler/turboshaft/machine-lowering-reducer-inl.h
++++ b/src/compiler/turboshaft/machine-lowering-reducer-inl.h
+@@ -2001,7 +2001,11 @@ class MachineLoweringReducer : public Next {
+     __ InitializeField(string, AccessBuilder::ForStringLength(), length);
+     __ InitializeField(string, AccessBuilder::ForConsStringFirst(), first);
+     __ InitializeField(string, AccessBuilder::ForConsStringSecond(), second);
+-    return __ FinishInitialization(std::move(string));
++    V<ConsString> result = __ FinishInitialization(std::move(string));
++    __ Store(result, __ Word32Constant(0), StoreOp::Kind::TaggedBase(),
++             MemoryRepresentation::Uint32(), compiler::kNoWriteBarrier,
++             offsetof(String, taint_));
++    return result;
+   }
+ 
+   V<AnyFixedArray> REDUCE(NewArray)(V<WordPtr> length, NewArrayOp::Kind kind,
+@@ -2855,6 +2859,11 @@ class MachineLoweringReducer : public Next {
+     V<Map> map = __ LoadMapField(string);
+     V<Word32> instance_type = __ LoadInstanceTypeField(map);
+ 
++    V<Word32> taint =
++        __ Load(string, LoadOp::Kind::TaggedBase(),
++                MemoryRepresentation::Uint32(), offsetof(String, taint_));
++    GOTO_IF_NOT(__ Word32Equal(taint, __ Word32Constant(0)), slow);
++
+     // Fast path for INTERNALIZED_ONE_BYTE_STRING_TYPE /
+     // SEQ_ONE_BYTE_STRING_TYPE and length < Substring::kMinLength.
+     GOTO_IF(__ Word32Equal(instance_type, INTERNALIZED_ONE_BYTE_STRING_TYPE),
+@@ -2911,6 +2920,10 @@ class MachineLoweringReducer : public Next {
+         index = __ WordPtrAdd(index, 1);
+       }
+ 
++      __ Initialize(new_string, __ Word32Constant(0),
++                    MemoryRepresentation::Uint32(),
++                    WriteBarrierKind::kNoWriteBarrier, offsetof(String, taint_));
++
+       GOTO(done, __ FinishInitialization(std::move(new_string)));
+     }
+     BIND(single_char);
+@@ -4445,6 +4458,8 @@ class MachineLoweringReducer : public Next {
+     __ InitializeField(string, AccessBuilderTS::ForStringLength(), length);
+     __ InitializeField(string, AccessBuilderTS::ForNameRawHashField(),
+                        Name::kEmptyHashField);
++    __ Initialize(string, __ Word32Constant(0), MemoryRepresentation::Uint32(),
++                  WriteBarrierKind::kNoWriteBarrier, offsetof(String, taint_));
+     // Do not finish allocation here, because the caller has to initialize
+     // characters.
+     return string;
+diff --git a/src/execution/execution.cc b/src/execution/execution.cc
+index 39d72063ef5..0eed7ac3c3d 100644
+--- a/src/execution/execution.cc
++++ b/src/execution/execution.cc
+@@ -11,6 +11,7 @@
+ #include "src/execution/isolate-inl.h"
+ #include "src/execution/vm-state-inl.h"
+ #include "src/logging/runtime-call-stats-scope.h"
++#include "src/strings/taint.h"
+ 
+ #if V8_ENABLE_WEBASSEMBLY
+ #include "src/wasm/code-space-access.h"
+@@ -389,6 +390,9 @@ V8_WARN_UNUSED_RESULT MaybeHandle<Object> Invoke(Isolate* isolate,
+       // always produce name clashes with themselves.
+       function->set_context(*context);
+     }
++    if (function->shared()->IsUserJavaScript()) {
++      MarkTaintedFunctionArguments(isolate, function, params.args);
++    }
+   }
+ 
+   // Entering JavaScript.
+diff --git a/src/execution/isolate.h b/src/execution/isolate.h
+index 9c5cc6b63b4..0725af6819e 100644
+--- a/src/execution/isolate.h
++++ b/src/execution/isolate.h
+@@ -40,6 +40,7 @@
+ #include "src/execution/stack-guard.h"
+ #include "src/handles/handles.h"
+ #include "src/handles/traced-handles.h"
++#include "src/strings/taint.h"
+ #include "src/heap/factory.h"
+ #include "src/heap/heap.h"
+ #include "src/heap/read-only-heap.h"
+@@ -1672,6 +1673,13 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
+ 
+   void set_date_cache(DateCache* date_cache);
+ 
++  const TaintLocation& fallback_taint_location() const {
++    return fallback_taint_location_;
++  }
++  void set_fallback_taint_location(const TaintLocation& location) {
++    fallback_taint_location_ = location;
++  }
++
+   // Cache stamp used for invalidating caches in JSDate.
+   // We increment the stamp each time when the timezone information changes.
+   // JSDate objects perform stamp check and invalidate their caches if
+@@ -2704,6 +2712,7 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
+   // TerminateExecution exceptions.
+   std::unordered_set<int32_t*> active_dynamic_regexp_result_vectors_;
+   DateCache* date_cache_ = nullptr;
++  TaintLocation fallback_taint_location_;
+   base::RandomNumberGenerator* random_number_generator_ = nullptr;
+   base::RandomNumberGenerator* fuzzer_rng_ = nullptr;
+   v8::Isolate::ReleaseCppHeapCallback release_cpp_heap_callback_ = nullptr;
+diff --git a/src/flags/flag-definitions.h b/src/flags/flag-definitions.h
+index 6eab9126868..f0635e2d513 100644
+--- a/src/flags/flag-definitions.h
++++ b/src/flags/flag-definitions.h
+@@ -705,8 +705,10 @@ DEFINE_BOOL(maglev_destroy_on_background, true,
+             "Destroy compilation jobs on background thread")
+ DEFINE_BOOL(maglev_inline_api_calls, false,
+             "Inline CallApiCallback builtin into generated code")
+-DEFINE_BOOL(maglev_cons_string_elision, true,
++DEFINE_BOOL(maglev_cons_string_elision, false,
+             "Native support for cons strings and their elision in maglev.")
++DEFINE_BOOL(taint_disable_jit_string_inlining, true,
++            "Disable JIT inlining of taint-instrumented string builtins")
+ DEFINE_BOOL(maglev_pretenure_store_values, true,
+             "Recursively pretenure values which are stored into pretenured "
+             "allocation sites.")
+diff --git a/src/heap/factory-base.cc b/src/heap/factory-base.cc
+index c0f4e193dcf..a0b5057b6fa 100644
+--- a/src/heap/factory-base.cc
++++ b/src/heap/factory-base.cc
+@@ -886,6 +886,7 @@ MaybeHandle<SeqStringT> FactoryBase<Impl>::NewRawStringWithMap(
+   string->clear_padding_destructively(length);
+   string->set_length(length);
+   string->set_raw_hash_field(String::kEmptyHashField);
++  string->taint_.store_encoded(kNullExternalPointer);
+   DCHECK_EQ(size, string->Size());
+   return handle(string, isolate());
+ }
+@@ -950,7 +951,9 @@ HandleType<String>::MaybeType FactoryBase<Impl>::NewConsString(
+ 
+   uint32_t length = left_length + right_length;
+ 
+-  if (length == 2) {
++  bool cons_tainted = left->IsTainted() || right->IsTainted();
++
++  if (length == 2 && !cons_tainted) {
+     uint16_t c1 = left->Get(0, isolate());
+     uint16_t c2 = right->Get(0, isolate());
+     return MakeOrFindTwoCharacterString(c1, c2);
+@@ -966,6 +969,12 @@ HandleType<String>::MaybeType FactoryBase<Impl>::NewConsString(
+   bool right_is_one_byte = right->IsOneByteRepresentation();
+   bool is_one_byte = left_is_one_byte && right_is_one_byte;
+ 
++  SafeStringTaint cons_taint;
++  if (cons_tainted) {
++    cons_taint = left->GetTaint().safeCopy();
++    cons_taint.concat(right->GetTaint(), left_length);
++  }
++
+   // If the resulting string is small make a flat string.
+   if (length < ConsString::kMinLength) {
+     // Note that neither of the two inputs can be a slice because:
+@@ -999,6 +1008,7 @@ HandleType<String>::MaybeType FactoryBase<Impl>::NewConsString(
+             right->template GetDirectStringChars<uint8_t>(no_gc, access_guard);
+         CopyChars(dest + left_length, src, right_length);
+       }
++      if (cons_tainted) result->SetTaint(isolate(), cons_taint);
+       return result;
+     }
+ 
+@@ -1011,6 +1021,7 @@ HandleType<String>::MaybeType FactoryBase<Impl>::NewConsString(
+     String::WriteToFlat(*left, sink, 0, left->length(), access_guard);
+     String::WriteToFlat(*right, sink + left->length(), 0, right->length(),
+                         access_guard);
++    if (cons_tainted) result->SetTaint(isolate(), cons_taint);
+     return result;
+   }
+ 
+@@ -1041,8 +1052,14 @@ Handle<String> FactoryBase<Impl>::NewConsString(DirectHandle<String> left,
+   WriteBarrierModeScope mode = result->GetWriteBarrierMode(no_gc);
+   result->set_raw_hash_field(String::kEmptyHashField);
+   result->set_length(length);
++  result->taint_.store_encoded(kNullExternalPointer);
+   result->set_first(*left, *mode);
+   result->set_second(*right, *mode);
++  if (left->IsTainted() || right->IsTainted()) {
++    SafeStringTaint cons_taint = left->GetTaint().safeCopy();
++    cons_taint.concat(right->GetTaint(), left->length());
++    result->SetTaint(isolate(), cons_taint);
++  }
+   return handle(result, isolate());
+ }
+ 
+@@ -1319,6 +1336,7 @@ FactoryBase<Impl>::AllocateRawOneByteInternalizedString(
+   answer->clear_padding_destructively(length);
+   answer->set_length(length);
+   answer->set_raw_hash_field(raw_hash_field);
++  answer->taint_.store_encoded(kNullExternalPointer);
+   DCHECK_EQ(size, answer->Size());
+   return handle(answer, isolate());
+ }
+@@ -1349,6 +1367,7 @@ FactoryBase<Impl>::AllocateRawTwoByteInternalizedString(
+   answer->clear_padding_destructively(length);
+   answer->set_length(length);
+   answer->set_raw_hash_field(raw_hash_field);
++  answer->taint_.store_encoded(kNullExternalPointer);
+   DCHECK_EQ(size, answer->Size());
+   return handle(answer, isolate());
+ }
+diff --git a/src/heap/factory.cc b/src/heap/factory.cc
+index 804ab733ca5..7a2fef217cb 100644
+--- a/src/heap/factory.cc
++++ b/src/heap/factory.cc
+@@ -1453,15 +1453,31 @@ Handle<String> Factory::NewProperSubString(DirectHandle<String> str,
+   DCHECK_LE(begin, str->length());
+   DCHECK_LE(end, str->length());
+ 
++  bool sub_tainted = str->IsTainted();
++  SafeStringTaint sub_taint;
++  if (sub_tainted && begin < end) {
++    sub_taint = SafeStringTaint(str->GetTaint(), begin, end);
++  }
++
+   str = String::Flatten(isolate(), str);
+ 
+   if (begin >= end) return empty_string();
+   uint32_t length = end - begin;
+ 
+   if (length == 1) {
++    if (sub_tainted) {
++      Handle<String> copied = NewCopiedSubstring(str, begin, length);
++      copied->SetTaint(isolate(), sub_taint);
++      return copied;
++    }
+     return LookupSingleCharacterStringFromCode(str->Get(begin));
+   }
+   if (length == 2) {
++    if (sub_tainted) {
++      Handle<String> copied = NewCopiedSubstring(str, begin, length);
++      copied->SetTaint(isolate(), sub_taint);
++      return copied;
++    }
+     // Optimization for 2-byte strings often used as keys in a decompression
+     // dictionary.  Check whether we already have the string in the string
+     // table to prevent creation of many unnecessary strings.
+@@ -1471,7 +1487,9 @@ Handle<String> Factory::NewProperSubString(DirectHandle<String> str,
+   }
+ 
+   if (!v8_flags.string_slices || length < SlicedString::kMinLength) {
+-    return NewCopiedSubstring(str, begin, length);
++    Handle<String> copied = NewCopiedSubstring(str, begin, length);
++    if (sub_tainted) copied->SetTaint(isolate(), sub_taint);
++    return copied;
+   }
+ 
+   int offset = begin;
+@@ -1497,6 +1515,8 @@ Handle<String> Factory::NewProperSubString(DirectHandle<String> str,
+   slice->set_length(length);
+   slice->set_parent(*str);
+   slice->set_offset(offset);
++  slice->taint_.store_encoded(kNullExternalPointer);
++  if (sub_tainted) slice->SetTaint(isolate(), sub_taint);
+   return handle(slice, isolate());
+ }
+ 
+diff --git a/src/heap/heap-inl.h b/src/heap/heap-inl.h
+index ffe18c4acad..2559a3ddf0f 100644
+--- a/src/heap/heap-inl.h
++++ b/src/heap/heap-inl.h
+@@ -221,6 +221,15 @@ void Heap::FinalizeExternalString(Tagged<String> string) {
+   ext_string->DisposeResource(isolate());
+ }
+ 
++void Heap::RegisterTaintedString(Tagged<String> string) {
++  if (HeapLayout::InYoungGeneration(string)) return;
++  tainted_string_table_.AddString(string);
++}
++
++void Heap::FinalizeTaintedString(Tagged<String> string) {
++  string->DisposeTaint(isolate());
++}
++
+ Address Heap::NewSpaceTop() {
+   return new_space_ || v8_flags.sticky_mark_bits
+              ? allocator()->new_space_allocator()->top()
+@@ -332,6 +341,16 @@ void Heap::ExternalStringTable::AddString(Tagged<String> string) {
+   bytes_ += string->length();
+ }
+ 
++void Heap::TaintedStringTable::AddString(Tagged<String> string) {
++  std::optional<base::MutexGuard> guard;
++  if (v8_flags.shared_string_table &&
++      heap_->isolate()->is_shared_space_isolate()) {
++    guard.emplace(&mutex_);
++  }
++  DCHECK(!HeapLayout::InYoungGeneration(string));
++  strings_.push_back(string);
++}
++
+ Tagged<Boolean> Heap::ToBoolean(bool condition) {
+   ReadOnlyRoots roots(this);
+   return roots.boolean_value(condition);
+diff --git a/src/heap/heap.cc b/src/heap/heap.cc
+index e9423f6d42e..6e8dc03149a 100644
+--- a/src/heap/heap.cc
++++ b/src/heap/heap.cc
+@@ -292,6 +292,7 @@ Heap::Heap()
+       memory_pressure_level_(MemoryPressureLevel::kNone),
+       safepoint_(std::make_unique<IsolateSafepoint>(this)),
+       external_string_table_(this),
++      tainted_string_table_(this),
+       allocation_type_for_in_place_internalizable_strings_(
+           v8_flags.shared_string_table ? AllocationType::kSharedOld
+                                        : AllocationType::kOld),
+@@ -2682,6 +2683,40 @@ void Heap::ExternalStringTable::UpdateReferences(
+   }
+ }
+ 
++bool Heap::TaintedStringTable::Contains(Tagged<String> string) {
++  for (size_t i = 0; i < strings_.size(); ++i) {
++    if (strings_[i] == string) return true;
++  }
++  return false;
++}
++
++void Heap::TaintedStringTable::Iterate(RootVisitor* v) {
++  if (!strings_.empty()) {
++    v->VisitRootPointers(Root::kExternalStringsTable, nullptr,
++                         FullObjectSlot(strings_.data()),
++                         FullObjectSlot(strings_.data() + strings_.size()));
++  }
++}
++
++void Heap::TaintedStringTable::Update(
++    base::FunctionRef<void(Tagged<HeapObject>)> callback) {
++  for (size_t i = 0; i < strings_.size(); ++i) {
++    Tagged<Object> o = strings_[i];
++    if (IsHeapObject(o)) callback(Cast<HeapObject>(o));
++  }
++}
++
++void Heap::TaintedStringTable::UpdateReferences(
++    Heap::ExternalStringTableUpdaterCallback updater_func) {
++  if (!strings_.empty()) {
++    FullObjectSlot start(strings_.data());
++    FullObjectSlot end(strings_.data() + strings_.size());
++    for (FullObjectSlot p = start; p < end; ++p) {
++      p.store(updater_func(heap_, p));
++    }
++  }
++}
++
+ void Heap::ProcessAllWeakReferences(WeakObjectRetainer* retainer) {
+   ProcessNativeContexts(retainer);
+   ProcessAllocationSites(retainer);
+@@ -3842,6 +3877,15 @@ class ExternalPointerSlotInvalidator final
+   void VisitExternalPointer(Tagged<HeapObject> host,
+                             ExternalPointerSlot slot) override {
+     DCHECK_EQ(target_, host);
++    // Foxhound: never invalidate the taint external pointer field. It lives in
++    // the String base (offset 12) and survives String::MakeThin unchanged --
++    // ThinString keeps the field at the same offset, and MakeThin already
++    // transfers the taint value to the internalized string. The field is
++    // therefore not stale after the layout change, and it is frequently null,
++    // which NotifyExternalPointerFieldInvalidated's DCHECK does not tolerate.
++    if (slot.ExactTagIsKnown() && slot.exact_tag() == kStringTaintTag) {
++      return;
++    }
+     ExternalPointerTable::Space* space =
+         IsolateForSandbox(isolate_).GetExternalPointerTableSpaceFor(
+             slot.tag_range(), host.address());
+@@ -6311,6 +6355,7 @@ void Heap::TearDownWithSharedHeap() {
+ 
+   // Might use the external pointer which might be in the shared heap.
+   external_string_table_.TearDown();
++  tainted_string_table_.TearDown();
+ 
+   // Publish shared object worklist for the main thread if incremental marking
+   // is enabled for the shared heap.
+@@ -6974,6 +7019,28 @@ void Heap::ExternalStringTable::TearDown() {
+   old_strings_.clear();
+ }
+ 
++void Heap::TaintedStringTable::CleanUp() {
++  size_t last = 0;
++  for (size_t i = 0; i < strings_.size(); ++i) {
++    Tagged<Object> o = strings_[i];
++    if (IsTheHole(o)) {
++      continue;
++    }
++    if (!IsString(o)) continue;
++    strings_[last++] = o;
++  }
++  strings_.resize(last);
++}
++
++void Heap::TaintedStringTable::TearDown() {
++  for (size_t i = 0; i < strings_.size(); ++i) {
++    Tagged<Object> o = strings_[i];
++    if (!IsString(o)) continue;
++    heap_->FinalizeTaintedString(Cast<String>(o));
++  }
++  strings_.clear();
++}
++
+ void Heap::RememberUnmappedPage(Address page, bool compacted) {
+   // Tag the page pointer to make it findable in the dump file.
+   if (compacted) {
+diff --git a/src/heap/heap.h b/src/heap/heap.h
+index 676319f2b17..190cb93c9e4 100644
+--- a/src/heap/heap.h
++++ b/src/heap/heap.h
+@@ -1209,6 +1209,10 @@ class Heap final {
+   // data and clearing the resource pointer.
+   inline void FinalizeExternalString(Tagged<String> string);
+ 
++  inline void RegisterTaintedString(Tagged<String> string);
++
++  inline void FinalizeTaintedString(Tagged<String> string);
++
+   // ===========================================================================
+   // Methods checking/returning the space of a given object/address. ===========
+   // ===========================================================================
+@@ -1766,6 +1770,31 @@ class Heap final {
+     base::Mutex mutex_;
+   };
+ 
++  class TaintedStringTable {
++   public:
++    explicit TaintedStringTable(Heap* heap) : heap_(heap) {}
++    TaintedStringTable(const TaintedStringTable&) = delete;
++    TaintedStringTable& operator=(const TaintedStringTable&) = delete;
++
++    inline void AddString(Tagged<String> string);
++    bool Contains(Tagged<String> string);
++
++    void Iterate(RootVisitor* visitor);
++    void Update(base::FunctionRef<void(Tagged<HeapObject>)> callback);
++
++    void CleanUp();
++
++    void TearDown();
++
++    void UpdateReferences(
++        Heap::ExternalStringTableUpdaterCallback updater_func);
++
++   private:
++    Heap* const heap_;
++    std::vector<TaggedBase> strings_;
++    base::Mutex mutex_;
++  };
++
+   static const int kInitialEvalCacheSize = 64;
+ 
+   static const int kRememberedUnmappedPages = 128;
+@@ -2366,6 +2395,7 @@ class Heap final {
+       GarbageCollector::SCAVENGER;
+ 
+   ExternalStringTable external_string_table_;
++  TaintedStringTable tainted_string_table_;
+ 
+   const AllocationType allocation_type_for_in_place_internalizable_strings_;
+ 
+diff --git a/src/heap/mark-compact.cc b/src/heap/mark-compact.cc
+index 5cb959c244c..ce76ea45b2d 100644
+--- a/src/heap/mark-compact.cc
++++ b/src/heap/mark-compact.cc
+@@ -3203,6 +3203,9 @@ void MarkCompactCollector::ClearNonLiveReferences() {
+         ExternalStringTableCleanerVisitor external_visitor(heap_);
+         heap_->external_string_table_.Iterate(&external_visitor);
+         heap_->external_string_table_.CleanUp();
++        TaintedStringTableCleanerVisitor tainted_visitor(heap_);
++        heap_->tainted_string_table_.Iterate(&tainted_visitor);
++        heap_->tainted_string_table_.CleanUp();
+       }).Enqueue(parallel_clearing_job);
+ 
+   auto clear_weak_global_handles =
+@@ -5840,6 +5843,9 @@ void MarkCompactCollector::UpdatePointersAfterEvacuation() {
+     heap_->external_string_table_.UpdateReferences(
+         &UpdateReferenceInExternalStringTableEntry);
+ 
++    heap_->tainted_string_table_.UpdateReferences(
++        &UpdateReferenceInExternalStringTableEntry);
++
+     // Update pointers in string forwarding table.
+     // When GC was performed without a stack, the table was cleared and this
+     // does nothing. In the case this was a GC with stack, we need to update
+diff --git a/src/heap/mark-sweep-utilities.cc b/src/heap/mark-sweep-utilities.cc
+index afb2ba9125f..9866ba94327 100644
+--- a/src/heap/mark-sweep-utilities.cc
++++ b/src/heap/mark-sweep-utilities.cc
+@@ -122,6 +122,26 @@ void ExternalStringTableCleanerVisitor::VisitRootPointers(
+   }
+ }
+ 
++void TaintedStringTableCleanerVisitor::VisitRootPointers(
++    Root root, const char* description, FullObjectSlot start,
++    FullObjectSlot end) {
++  NonAtomicMarkingState* marking_state = heap_->non_atomic_marking_state();
++  Tagged<Object> the_hole = ReadOnlyRoots(heap_).the_hole_value();
++  for (FullObjectSlot p = start; p < end; ++p) {
++    Tagged<Object> o = *p;
++    if (!IsHeapObject(o)) continue;
++    Tagged<HeapObject> heap_object = Cast<HeapObject>(o);
++    if (MarkingHelper::IsMarkedOrAlwaysLive(heap_, marking_state,
++                                            heap_object)) {
++      continue;
++    }
++    if (IsString(o)) {
++      heap_->FinalizeTaintedString(Cast<String>(o));
++    }
++    p.store(the_hole);
++  }
++}
++
+ StringForwardingTableCleanerBase::StringForwardingTableCleanerBase(Heap* heap)
+     : isolate_(heap->isolate()),
+       marking_state_(heap->non_atomic_marking_state()),
+diff --git a/src/heap/mark-sweep-utilities.h b/src/heap/mark-sweep-utilities.h
+index d09593ddd00..313d3c466a6 100644
+--- a/src/heap/mark-sweep-utilities.h
++++ b/src/heap/mark-sweep-utilities.h
+@@ -83,6 +83,17 @@ class ExternalStringTableCleanerVisitor final : public RootVisitor {
+   Heap* heap_;
+ };
+ 
++class TaintedStringTableCleanerVisitor final : public RootVisitor {
++ public:
++  explicit TaintedStringTableCleanerVisitor(Heap* heap) : heap_(heap) {}
++
++  void VisitRootPointers(Root root, const char* description,
++                         FullObjectSlot start, FullObjectSlot end) final;
++
++ private:
++  Heap* heap_;
++};
++
+ class StringForwardingTableCleanerBase {
+  protected:
+   explicit StringForwardingTableCleanerBase(Heap* heap);
+diff --git a/src/heap/marking-visitor-inl.h b/src/heap/marking-visitor-inl.h
+index 492dadebe7a..2b2e479c6f1 100644
+--- a/src/heap/marking-visitor-inl.h
++++ b/src/heap/marking-visitor-inl.h
+@@ -247,7 +247,9 @@ void MarkingVisitorBase<ConcreteVisitor>::VisitExternalPointer(
+     space = shared_external_pointer_space_;
+   } else {
+     table = external_pointer_table_;
+-    if constexpr (v8_flags.sticky_mark_bits.value()) {
++    if (slot.tag_range().Contains(kStringTaintTag)) {
++      space = heap_->old_external_pointer_space();
++    } else if constexpr (v8_flags.sticky_mark_bits.value()) {
+       // Everything is considered old during major GC.
+       DCHECK(!HeapLayout::InYoungGeneration(host));
+       if (handle == kNullExternalPointerHandle) return;
+diff --git a/src/heap/scavenger.cc b/src/heap/scavenger.cc
+index 29a3f617a27..f5664ffc78a 100644
+--- a/src/heap/scavenger.cc
++++ b/src/heap/scavenger.cc
+@@ -500,6 +500,7 @@ class ScavengerObjectVisitorBase : public NewSpaceVisitor<ConcreteVisitor> {
+ 
+   V8_INLINE void VisitExternalPointer(Tagged<HeapObject> host,
+                                       ExternalPointerSlot slot) override {
++    if (slot.tag_range().Contains(kStringTaintTag)) return;
+ #ifdef V8_COMPRESS_POINTERS
+     DCHECK(!slot.tag_range().IsEmpty());
+     DCHECK(!IsSharedExternalPointerType(slot.tag_range()));
+@@ -2177,6 +2178,7 @@ SlotCallbackResult Scavenger::EvacuateShortcutCandidate(
+   DCHECK(IsShortcutCandidate(map->instance_type()));
+ 
+   if (shortcut_strings_ &&
++      object->taint_.load_encoded() == kNullExternalPointer &&
+       object->unchecked_second() == ReadOnlyRoots(heap()).empty_string()) {
+     Tagged<HeapObject> first = Cast<HeapObject>(object->unchecked_first());
+ 
+diff --git a/src/heap/setup-heap-internal.cc b/src/heap/setup-heap-internal.cc
+index 7cabdd05168..ec13974e830 100644
+--- a/src/heap/setup-heap-internal.cc
++++ b/src/heap/setup-heap-internal.cc
+@@ -483,6 +483,7 @@ bool Heap::CreateEarlyReadOnlyMapsAndObjects() {
+     Cast<SeqOneByteString>(empty_string)->clear_padding_destructively(0);
+     empty_string->set_length(0);
+     empty_string->set_raw_hash_field(String::kEmptyHashField);
++    empty_string->taint_.store_encoded(kNullExternalPointer);
+   }
+ 
+   // Now that the initial objects are allocated, we can start allocating other
+diff --git a/src/ic/accessor-assembler.cc b/src/ic/accessor-assembler.cc
+index 52aec124a61..fabaa96379c 100644
+--- a/src/ic/accessor-assembler.cc
++++ b/src/ic/accessor-assembler.cc
+@@ -778,6 +778,15 @@ void AccessorAssembler::HandleLoadICSmiHandlerCase(
+         TNode<UintPtrT> length =
+             Unsigned(LoadStringLengthAsWord(string_holder));
+         GotoIf(UintPtrGreaterThanOrEqual(index, length), &if_oob_string);
++        Label if_cached_char(this);
++        GotoIf(Word32Equal(LoadObjectField<Uint32T>(string_holder,
++                                                    offsetof(String, taint_)),
++                           Uint32Constant(0)),
++               &if_cached_char);
++        Return(CallRuntime(Runtime::kStringSubstring, NoContextConstant(),
++                           string_holder, SmiTag(index),
++                           SmiTag(IntPtrAdd(index, IntPtrConstant(1)))));
++        BIND(&if_cached_char);
+         TNode<Uint16T> code = StringCharCodeAt(string_holder, Unsigned(index));
+         TNode<String> result = StringFromSingleCharCode(code);
+         Return(result);
+@@ -3059,6 +3068,15 @@ void AccessorAssembler::GenericElementLoad(
+     Comment("load string character");
+     TNode<IntPtrT> length = LoadStringLengthAsWord(CAST(lookup_start_object));
+     GotoIfNot(UintPtrLessThan(index, length), slow);
++    Label if_cached_char(this);
++    GotoIf(Word32Equal(LoadObjectField<Uint32T>(lookup_start_object,
++                                                offsetof(String, taint_)),
++                       Uint32Constant(0)),
++           &if_cached_char);
++    Return(CallRuntime(Runtime::kStringSubstring, NoContextConstant(),
++                       lookup_start_object, SmiTag(index),
++                       SmiTag(IntPtrAdd(index, IntPtrConstant(1)))));
++    BIND(&if_cached_char);
+     TailCallBuiltin(Builtin::kStringCharAt, NoContextConstant(),
+                     lookup_start_object, index);
+   }
+diff --git a/src/init/bootstrapper.cc b/src/init/bootstrapper.cc
+index 9105e2cc67e..11bcdf7fdc4 100644
+--- a/src/init/bootstrapper.cc
++++ b/src/init/bootstrapper.cc
+@@ -2731,6 +2731,9 @@ void Genesis::InitializeGlobal(DirectHandle<JSGlobalObject> global_object,
+     SimpleInstallFunction(isolate_, string_fun, "raw", Builtin::kStringRaw, 1,
+                           kDontAdapt);
+ 
++    SimpleInstallFunction(isolate_, string_fun, "tainted",
++                          Builtin::kStringTainted, 1, kDontAdapt);
++
+     // Create the %StringPrototype%
+     DirectHandle<JSPrimitiveWrapper> prototype = Cast<JSPrimitiveWrapper>(
+         factory->NewJSObject(string_fun, AllocationType::kOld));
+@@ -2742,6 +2745,14 @@ void Genesis::InitializeGlobal(DirectHandle<JSGlobalObject> global_object,
+     JSObject::AddProperty(isolate_, prototype, factory->constructor_string(),
+                           string_fun, DONT_ENUM);
+ 
++    SimpleInstallGetterSetter(isolate_, prototype,
++                              factory->InternalizeUtf8String("taint"),
++                              Builtin::kStringPrototypeTaintGetter,
++                              Builtin::kStringPrototypeTaintSetter);
++
++    SimpleInstallFunction(isolate_, prototype, "untaint",
++                          Builtin::kStringPrototypeUntaint, 0, kDontAdapt);
++
+     // Install the String.prototype methods.
+     SimpleInstallFunction(isolate_, prototype, "anchor",
+                           Builtin::kStringPrototypeAnchor, 1, kDontAdapt);
+diff --git a/src/json/json-parser.cc b/src/json/json-parser.cc
+index e1fcb293dd7..ef443ad0529 100644
+--- a/src/json/json-parser.cc
++++ b/src/json/json-parser.cc
+@@ -34,6 +34,7 @@
+ #include "src/roots/roots.h"
+ #include "src/strings/char-predicates-inl.h"
+ #include "src/strings/string-hasher.h"
++#include "src/strings/taint.h"
+ #include "src/utils/boxed-float.h"
+ 
+ namespace v8 {
+@@ -398,6 +399,7 @@ JsonParser<Char>::JsonParser(Isolate* isolate, Handle<String> source,
+   }
+   cursor_ = chars_ + start;
+   end_ = cursor_ + length;
++  taint_offset_ = static_cast<uint32_t>(start);
+ }
+ 
+ template <typename Char>
+@@ -1096,6 +1098,7 @@ bool JsonParser<Char>::ParseJsonPropertyValue(const JsonString& key) {
+   EXPECT_NEXT_RETURN_ON_ERROR(
+       JsonToken::COLON,
+       MessageTemplate::kJsonParseExpectedColonAfterPropertyName, false);
++  SetJsonPathKey(key);
+   Handle<Object> value;
+   if (V8_UNLIKELY(!ParseJsonValueRecursive().ToHandle(&value))) return false;
+   property_stack_.emplace_back(key, value);
+@@ -1294,6 +1297,7 @@ MaybeHandle<Object> JsonParser<Char>::ParseJsonObject(Handle<Map> feedback) {
+ 
+   JsonContinuation cont(isolate_, JsonContinuation::kObjectProperty,
+                         property_stack_.size());
++  PushJsonPath(false);
+   bool success;
+   using FastIterableState = DescriptorArray::FastIterableState;
+   const MessageTemplate first_token_msg =
+@@ -1335,6 +1339,7 @@ MaybeHandle<Object> JsonParser<Char>::ParseJsonObject(Handle<Map> feedback) {
+                          MessageTemplate::kJsonParseExpectedCommaOrRBrace, {});
+   Handle<Object> result = BuildJsonObject<false>(cont, feedback);
+   property_stack_.resize(cont.index());
++  PopJsonPath();
+   return cont.scope.CloseAndEscape(result);
+ }
+ 
+@@ -1429,6 +1434,8 @@ MaybeHandle<Object> JsonParser<Char>::ParseJsonArray() {
+   }
+   double_elements_.resize(0);
+ 
++  PushJsonPath(true);
++  SetJsonPathIndex(static_cast<uint32_t>(element_stack_.size() - start));
+   Handle<Object> value;
+   if (V8_UNLIKELY(!ParseJsonValueRecursive().ToHandle(&value))) return {};
+   element_stack_.emplace_back(value);
+@@ -1442,6 +1449,7 @@ MaybeHandle<Object> JsonParser<Char>::ParseJsonArray() {
+         feedback = handle(maybe_feedback, isolate_);
+       }
+     }
++    SetJsonPathIndex(static_cast<uint32_t>(element_stack_.size() - start));
+     if (V8_UNLIKELY(!ParseJsonValueRecursive(feedback).ToHandle(&value))) {
+       return {};
+     }
+@@ -1452,6 +1460,7 @@ MaybeHandle<Object> JsonParser<Char>::ParseJsonArray() {
+                          MessageTemplate::kJsonParseExpectedCommaOrRBrack, {});
+   Handle<Object> result = BuildJsonArray(start);
+   element_stack_.resize(start);
++  PopJsonPath();
+   return handle_scope.CloseAndEscape(result);
+ }
+ 
+@@ -1555,6 +1564,7 @@ MaybeHandle<Object> JsonParser<Char>::ParseJsonValue() {
+           cont_stack.emplace_back(std::move(cont));
+           cont = JsonContinuation(isolate_, JsonContinuation::kObjectProperty,
+                                   property_stack_.size());
++          PushJsonPath(false);
+ 
+           // Parse the property key.
+           // GetNextNonWhitespaceToken was already performed by
+@@ -1563,6 +1573,7 @@ MaybeHandle<Object> JsonParser<Char>::ParseJsonValue() {
+               JsonToken::STRING,
+               MessageTemplate::kJsonParseExpectedPropNameOrRBrace, {});
+           property_stack_.emplace_back(ScanJsonPropertyKey(&cont));
++          SetJsonPathKey(property_stack_.back().string);
+           if constexpr (should_track_json_source) {
+             property_val_node_stack.emplace_back(Handle<Object>());
+           }
+@@ -1589,6 +1600,7 @@ MaybeHandle<Object> JsonParser<Char>::ParseJsonValue() {
+           cont_stack.emplace_back(std::move(cont));
+           cont = JsonContinuation(isolate_, JsonContinuation::kArrayElement,
+                                   element_stack_.size());
++          PushJsonPath(true);
+ 
+           // Continue to start producing the first array element.
+           continue;
+@@ -1671,6 +1683,7 @@ MaybeHandle<Object> JsonParser<Char>::ParseJsonValue() {
+                 {});
+ 
+             property_stack_.emplace_back(ScanJsonPropertyKey(&cont));
++            SetJsonPathKey(property_stack_.back().string);
+             if constexpr (should_track_json_source) {
+               property_val_node_stack.emplace_back(Handle<Object>());
+             }
+@@ -1730,6 +1743,7 @@ MaybeHandle<Object> JsonParser<Char>::ParseJsonValue() {
+             value = cont.scope.CloseAndEscape(value);
+           }
+           property_stack_.resize(cont.index());
++          PopJsonPath();
+ 
+           // Pop the continuation.
+           cont = std::move(cont_stack.back());
+@@ -1745,7 +1759,11 @@ MaybeHandle<Object> JsonParser<Char>::ParseJsonValue() {
+             element_val_node_stack.emplace_back(val_node);
+           }
+           // Break to start producing the subsequent element value.
+-          if (V8_LIKELY(Check<JsonToken::COMMA>())) break;
++          if (V8_LIKELY(Check<JsonToken::COMMA>())) {
++            SetJsonPathIndex(
++                static_cast<uint32_t>(element_stack_.size() - cont.index()));
++            break;
++          }
+ 
+           value = BuildJsonArray(cont.index());
+           EXPECT_RETURN_ON_ERROR(
+@@ -1774,6 +1792,7 @@ MaybeHandle<Object> JsonParser<Char>::ParseJsonValue() {
+             value = cont.scope.CloseAndEscape(value);
+           }
+           element_stack_.resize(cont.index());
++          PopJsonPath();
+           // Pop the continuation.
+           cont = std::move(cont_stack.back());
+           cont_stack.pop_back();
+@@ -1923,31 +1942,47 @@ Handle<String> JsonParser<Char>::DecodeString(
+     const JsonString& string, Handle<SinkSeqString> intermediate,
+     Handle<String> hint) {
+   using SinkChar = typename SinkSeqString::Char;
++  SafeStringTaint taint;
++  const bool tainted = !string.internalize() && HasSourceTaint(string);
+   {
+     DisallowGarbageCollection no_gc;
+     SinkChar* dest = intermediate->GetChars(no_gc);
+     if (!string.has_escape()) {
+       DCHECK(!string.internalize());
+       CopyChars(dest, chars_ + string.start(), string.length());
+-      return intermediate;
++      if (tainted) {
++        uint32_t begin = string.start() - taint_offset_;
++        taint = SafeStringTaint(TaintSource()->GetTaint(), begin,
++                                begin + string.length());
++      }
++    } else {
++      DecodeString(dest, string.start(), string.length(),
++                   tainted ? &taint : nullptr);
++      if (string.internalize()) {
++        base::Vector<const SinkChar> data(dest, string.length());
++        if (!hint.is_null() && Matches(data, hint)) return hint;
++      }
+     }
+-    DecodeString(dest, string.start(), string.length());
+-
+-    if (!string.internalize()) return intermediate;
+-
+-    base::Vector<const SinkChar> data(dest, string.length());
+-    if (!hint.is_null() && Matches(data, hint)) return hint;
+   }
+ 
+-  DCHECK_EQ(intermediate->length(), string.length());
+-  return factory()->InternalizeString(intermediate);
++  if (string.internalize()) {
++    DCHECK_EQ(intermediate->length(), string.length());
++    return factory()->InternalizeString(intermediate);
++  }
++  if (taint.hasTaint()) {
++    taint.extend(TaintOperationFromStack(isolate_, "JSON.parse",
++                                         {CurrentJsonPath()}));
++    intermediate->SetTaint(isolate_, taint);
++  }
++  return intermediate;
+ }
+ 
+ template <typename Char>
+ Handle<String> JsonParser<Char>::MakeString(const JsonString& string,
+                                             Handle<String> hint) {
+   if (string.length() == 0) return factory()->empty_string();
+-  if (string.length() == 1) {
++  const bool tainted = !string.internalize() && HasSourceTaint(string);
++  if (string.length() == 1 && !tainted) {
+     uint16_t first_char;
+     if (!string.has_escape()) {
+       first_char = chars_[string.start()];
+@@ -1957,7 +1992,7 @@ Handle<String> JsonParser<Char>::MakeString(const JsonString& string,
+     return factory()->LookupSingleCharacterStringFromCode(first_char);
+   }
+ 
+-  if (!string.has_escape()) {
++  if (!string.has_escape() && !tainted) {
+     bool should_internalize = string.internalize();
+     // For non-escaped strings, try to internalize the following candidates:
+     // 1. Property keys (string.internalize() is true in that case).
+@@ -2016,22 +2051,86 @@ Handle<String> JsonParser<Char>::MakeString(const JsonString& string,
+   return DecodeString(string, intermediate, hint);
+ }
+ 
++template <typename Char>
++Tagged<String> JsonParser<Char>::TaintSource() {
++  if (IsSlicedString(*original_source_)) return *original_source_;
++  return *source_;
++}
++
++template <typename Char>
++bool JsonParser<Char>::HasSourceTaint(const JsonString& string) {
++  Tagged<String> source = TaintSource();
++  if (!source->IsTainted()) return false;
++  uint32_t begin = string.start() - taint_offset_;
++  return SafeStringTaint(source->GetTaint(), begin, begin + string.length())
++      .hasTaint();
++}
++
++template <typename Char>
++void JsonParser<Char>::SetJsonPathKey(const JsonString& key) {
++  JsonPathEntry& entry = path_stack_.back();
++  entry.key_is_index = key.is_index();
++  if (!entry.key_is_index) {
++    entry.key_start = key.start();
++    entry.key_length = key.length();
++    entry.key_has_escape = key.has_escape();
++  }
++}
++
++template <typename Char>
++std::u16string JsonParser<Char>::CurrentJsonPath() {
++  std::u16string path(u"$");
++  for (const JsonPathEntry& entry : path_stack_) {
++    if (entry.is_array) {
++      std::string index = std::to_string(entry.index);
++      path.push_back(u'[');
++      path.append(index.begin(), index.end());
++      path.push_back(u']');
++    } else {
++      path.push_back(u'.');
++      if (entry.key_is_index) {
++        path.push_back(u'!');
++      } else if (entry.key_has_escape) {
++        std::vector<base::uc16> decoded(entry.key_length);
++        DecodeString(decoded.data(), entry.key_start, entry.key_length);
++        path.append(decoded.begin(), decoded.end());
++      } else {
++        path.append(chars_ + entry.key_start,
++                    chars_ + entry.key_start + entry.key_length);
++      }
++    }
++  }
++  return path;
++}
++
+ template <typename Char>
+ template <typename SinkChar>
+ void JsonParser<Char>::DecodeString(SinkChar* sink, uint32_t start,
+-                                    uint32_t length) {
++                                    uint32_t length, SafeStringTaint* taint) {
+   const Char* cursor = chars_ + start;
++  const SinkChar* sink_begin = sink;
++  const StringTaint* source_taint =
++      taint != nullptr ? &TaintSource()->GetTaint() : nullptr;
+   while (length > 0) {
+     // Copy everything until the first escape character
+     const Char* backslash_pos = std::find(cursor, cursor + length, '\\');
+     size_t to_copy = backslash_pos - cursor;
+     std::copy_n(cursor, to_copy, sink);
++    if (taint != nullptr && to_copy > 0) {
++      uint32_t begin = static_cast<uint32_t>(cursor - chars_) - taint_offset_;
++      taint->concat(SafeStringTaint(*source_taint, begin,
++                                    begin + static_cast<uint32_t>(to_copy)),
++                    static_cast<uint32_t>(sink - sink_begin));
++    }
+     length -= to_copy;
+     cursor += to_copy;
+     sink += to_copy;
+ 
+     if (length == 0) return;
+ 
++    const uint32_t escape_index =
++        static_cast<uint32_t>(cursor - chars_) - taint_offset_;
++    const SinkChar* escape_sink = sink;
+     cursor++;
+ 
+     switch (GetEscapeKind(character_json_scan_flags[*cursor])) {
+@@ -2086,6 +2185,14 @@ void JsonParser<Char>::DecodeString(SinkChar* sink, uint32_t start,
+       case EscapeKind::kIllegal:
+         UNREACHABLE();
+     }
++    if (taint != nullptr) {
++      const TaintFlow* flow = source_taint->at(escape_index);
++      if (flow != nullptr) {
++        taint->append(
++            TaintRange(static_cast<uint32_t>(escape_sink - sink_begin),
++                       static_cast<uint32_t>(sink - sink_begin), *flow));
++      }
++    }
+     cursor++;
+   }
+ }
+diff --git a/src/json/json-parser.h b/src/json/json-parser.h
+index 8fde4ccff56..798909711d4 100644
+--- a/src/json/json-parser.h
++++ b/src/json/json-parser.h
+@@ -6,6 +6,7 @@
+ #define V8_JSON_JSON_PARSER_H_
+ 
+ #include <optional>
++#include <string>
+ 
+ #include "include/v8-callbacks.h"
+ #include "src/base/bit-field.h"
+@@ -389,7 +390,8 @@ class JsonParser final {
+                             Handle<String> hint = Handle<String>());
+ 
+   template <typename SinkChar>
+-  void DecodeString(SinkChar* sink, uint32_t start, uint32_t length);
++  void DecodeString(SinkChar* sink, uint32_t start, uint32_t length,
++                    SafeStringTaint* taint = nullptr);
+ 
+   template <typename SinkSeqString>
+   Handle<String> DecodeString(const JsonString& string,
+@@ -433,6 +435,25 @@ class JsonParser final {
+                                    DirectHandle<Map> feedback);
+   Handle<Object> BuildJsonArray(size_t start);
+ 
++  struct JsonPathEntry {
++    bool is_array;
++    bool key_is_index;
++    bool key_has_escape;
++    uint32_t index;
++    uint32_t key_start;
++    uint32_t key_length;
++  };
++
++  void PushJsonPath(bool is_array) {
++    path_stack_.push_back(JsonPathEntry{is_array, false, false, 0, 0, 0});
++  }
++  void PopJsonPath() { path_stack_.pop_back(); }
++  void SetJsonPathKey(const JsonString& key);
++  void SetJsonPathIndex(uint32_t index) { path_stack_.back().index = index; }
++  std::u16string CurrentJsonPath();
++  Tagged<String> TaintSource();
++  bool HasSourceTaint(const JsonString& string);
++
+   static const int kMaxContextCharacters = 10;
+   static const int kMinOriginalSourceLengthForContext =
+       (kMaxContextCharacters * 2) + 1;
+@@ -517,6 +538,8 @@ class JsonParser final {
+   SmallVector<JsonProperty> property_stack_;
+   SmallVector<double> double_elements_;
+   SmallVector<int> smi_elements_;
++  SmallVector<JsonPathEntry> path_stack_;
++  uint32_t taint_offset_ = 0;
+ 
+   // Cached pointer to the raw chars in source. In case source is on-heap, we
+   // register an UpdatePointers callback. For this reason, chars_, cursor_ and
+diff --git a/src/json/json-stringifier.cc b/src/json/json-stringifier.cc
+index 73f136df023..89d20c744d1 100644
+--- a/src/json/json-stringifier.cc
++++ b/src/json/json-stringifier.cc
+@@ -26,6 +26,7 @@
+ #include "src/objects/smi.h"
+ #include "src/objects/tagged.h"
+ #include "src/strings/string-builder-inl.h"
++#include "src/strings/taint.h"
+ 
+ namespace v8 {
+ namespace internal {
+@@ -448,6 +449,7 @@ class JsonStringifier {
+   int stack_nesting_level_;
+   bool overflowed_;
+   bool need_stack_;
++  SafeStringTaint taint_;
+ 
+   using KeyObject = std::pair<Handle<Object>, Handle<Object>>;
+   std::vector<KeyObject> stack_;
+@@ -557,6 +559,48 @@ bool DoNotEscape(const SrcChar* chars, size_t length,
+   return no_escape;
+ }
+ 
++template <typename SrcChar>
++void AppendJsonStringTaint(const StringTaint& taint, const SrcChar* chars,
++                           uint32_t length, uint32_t offset,
++                           SafeStringTaint* result) {
++  auto it = taint.begin();
++  uint32_t dst = offset + 1;
++  uint32_t dst_begin = dst;
++  bool in_surrogate_pair = false;
++  for (uint32_t i = 0; i < length && it != taint.end(); i++) {
++    if (i == it->begin()) dst_begin = dst;
++    SrcChar c = chars[i];
++    uint32_t escaped_length = 1;
++    if (in_surrogate_pair) {
++      in_surrogate_pair = false;
++    } else if (!DoNotEscape(c)) {
++      bool is_surrogate = false;
++      if constexpr (sizeof(SrcChar) != 1) {
++        if (base::IsInRange(c, static_cast<SrcChar>(0xD800),
++                            static_cast<SrcChar>(0xDFFF))) {
++          is_surrogate = true;
++          if (c <= 0xDBFF && i + 1 < length &&
++              base::IsInRange(chars[i + 1], static_cast<SrcChar>(0xDC00),
++                              static_cast<SrcChar>(0xDFFF))) {
++            in_surrogate_pair = true;
++          } else {
++            escaped_length = 6;
++          }
++        }
++      }
++      if (!is_surrogate) {
++        escaped_length = static_cast<uint32_t>(
++            strlen(&JsonEscapeTable[c * kJsonEscapeTableEntrySize]));
++      }
++    }
++    dst += escaped_length;
++    if (i + 1 == it->end()) {
++      result->append(TaintRange(dst_begin, dst, it->flow()));
++      ++it;
++    }
++  }
++}
++
+ bool IsFastKey(Tagged<String> key, const DisallowGarbageCollection& no_gc) {
+   return key->DispatchToSpecificType(
+       absl::Overload{[&](Tagged<SeqOneByteString> str) {
+@@ -626,6 +670,7 @@ MaybeDirectHandle<Object> JsonStringifier::Stringify(Handle<JSAny> object,
+   if (result == NEED_STACK) {
+     indent_ = 0;
+     current_index_ = 0;
++    taint_.clear();
+     result = SerializeObject(object);
+   }
+   if (result == UNCHANGED) return factory()->undefined_value();
+@@ -633,15 +678,24 @@ MaybeDirectHandle<Object> JsonStringifier::Stringify(Handle<JSAny> object,
+     if (overflowed_ || current_index_ > String::kMaxLength) {
+       THROW_NEW_ERROR(isolate_, NewInvalidStringLengthError());
+     }
++    DirectHandle<String> serialized;
+     if (encoding_ == String::ONE_BYTE_ENCODING) {
+-      return isolate_->factory()
+-          ->NewStringFromOneByte(base::OneByteVector(
+-              reinterpret_cast<char*>(one_byte_ptr_), current_index_))
+-          .ToHandleChecked();
++      serialized = isolate_->factory()
++                       ->NewStringFromOneByte(base::OneByteVector(
++                           reinterpret_cast<char*>(one_byte_ptr_),
++                           current_index_))
++                       .ToHandleChecked();
+     } else {
+-      return isolate_->factory()->NewStringFromTwoByte(
+-          base::Vector<const base::uc16>(two_byte_ptr_, current_index_));
++      ASSIGN_RETURN_ON_EXCEPTION(
++          isolate_, serialized,
++          isolate_->factory()->NewStringFromTwoByte(
++              base::Vector<const base::uc16>(two_byte_ptr_, current_index_)));
+     }
++    if (taint_.hasTaint()) {
++      taint_.extend(TaintOperationFromStack(isolate_, "JSON.stringify"));
++      serialized->SetTaint(isolate_, taint_);
++    }
++    return serialized;
+   }
+   DCHECK(result == EXCEPTION);
+   CHECK(isolate_->has_exception());
+@@ -1597,10 +1651,15 @@ template <typename SrcChar, typename DestChar, bool raw_json>
+ bool JsonStringifier::SerializeString_(Tagged<String> string,
+                                        const DisallowGarbageCollection& no_gc) {
+   bool required_escaping = false;
++  base::Vector<const SrcChar> vector = string->GetCharVector<SrcChar>(no_gc);
++  if (!raw_json && V8_UNLIKELY(string->IsTainted())) {
++    AppendJsonStringTaint(string->GetTaint(), vector.data(),
++                          static_cast<uint32_t>(vector.size()),
++                          static_cast<uint32_t>(current_index_), &taint_);
++  }
+   if (!raw_json) Append<uint8_t, DestChar>('"');
+   // We might be able to fit the whole escaped string in the current string
+   // part, or we might need to allocate.
+-  base::Vector<const SrcChar> vector = string->GetCharVector<SrcChar>(no_gc);
+   if V8_LIKELY (EscapedLengthIfCurrentPartFits(vector.size())) {
+     NoExtendBuilder<DestChar> no_extend(
+         reinterpret_cast<DestChar*>(part_ptr_) + current_index_,
+@@ -2186,6 +2245,11 @@ class FastJsonStringifier {
+   void CopyResultTo(DstChar* out_buffer) {
+     buffer_.CopyTo(out_buffer);
+   }
++  void SetResultTaint(Tagged<String> result) {
++    if (!taint_.hasTaint()) return;
++    taint_.extend(TaintOperationFromStack(isolate_, "JSON.stringify"));
++    result->SetTaint(isolate_, taint_);
++  }
+   V8_INLINE FastJsonStringifierResult
+   SerializeObject(Tagged<JSAny> object, const DisallowGarbageCollection& no_gc);
+ 
+@@ -2329,6 +2393,8 @@ class FastJsonStringifier {
+   Isolate* isolate_;
+   OutBuffer<Char> buffer_;
+   base::SmallVector<ContinuationRecord, 16> stack_;
++  SafeStringTaint taint_;
++  uint32_t taint_offset_ = 0;
+ 
+   Tagged<HeapObject> initial_jsobject_proto_;
+   Tagged<HeapObject> initial_jsarray_proto_;
+@@ -2545,6 +2611,11 @@ FastJsonStringifierResult FastJsonStringifier<Char>::SerializeString(
+       chars = string->GetChars();
+     }
+     const uint32_t length = string->length();
++    if (V8_UNLIKELY(string->IsTainted())) {
++      AppendJsonStringTaint(
++          string->GetTaint(), chars, length,
++          taint_offset_ + static_cast<uint32_t>(buffer_.length()), &taint_);
++    }
+     EnsureCapacity(MaxEscapedStringLength(length) + 2 /* 2x double quote */);
+     AppendCharacterUnchecked('"');
+     AppendString(chars, length, no_gc);
+@@ -3122,6 +3193,9 @@ FastJsonStringifierResult FastJsonStringifier<Char>::ResumeFrom(
+   initial_jsobject_proto_ = old_stringifier.initial_jsobject_proto_;
+   initial_jsarray_proto_ = old_stringifier.initial_jsarray_proto_;
+   stack_ = old_stringifier.stack_;
++  taint_ = old_stringifier.taint_;
++  taint_offset_ = old_stringifier.taint_offset_ +
++                  static_cast<uint32_t>(old_stringifier.ResultLength());
+   ContinuationRecord cont = stack_.back();
+   stack_.pop_back();
+   if (cont.type() == ContinuationRecord::kObjectKey) {
+@@ -3563,6 +3637,7 @@ MaybeDirectHandle<Object> FastJsonStringify(Isolate* isolate,
+             isolate->factory()->NewRawOneByteString(static_cast<int>(length)));
+       }
+       one_byte_stringifier.CopyResultTo(ret->GetChars(no_gc));
++      one_byte_stringifier.SetResultTaint(*ret);
+       return ret;
+     } else {
+       DCHECK(two_byte_stringifier.has_value());
+@@ -3585,6 +3660,7 @@ MaybeDirectHandle<Object> FastJsonStringify(Isolate* isolate,
+       }
+       DCHECK_GT(two_byte_length, 0);
+       two_byte_stringifier->CopyResultTo(chars + one_byte_length);
++      two_byte_stringifier->SetResultTaint(*ret);
+       return ret;
+     }
+   } else if (result == UNDEFINED) {
+diff --git a/src/maglev/maglev-assembler.cc b/src/maglev/maglev-assembler.cc
+index ce421d171aa..83f00fbfac1 100644
+--- a/src/maglev/maglev-assembler.cc
++++ b/src/maglev/maglev-assembler.cc
+@@ -42,6 +42,7 @@ void MaglevAssembler::AllocateTwoByteString(RegisterSnapshot register_snapshot,
+   StoreInt32Field(result, offsetof(Name, raw_hash_field_),
+                   Name::kEmptyHashField);
+   StoreInt32Field(result, offsetof(String, length_), length);
++  StoreInt32Field(result, offsetof(String, taint_), 0);
+ }
+ 
+ Register MaglevAssembler::FromAnyToRegister(ConstInput input,
+diff --git a/src/maglev/maglev-graph-builder.cc b/src/maglev/maglev-graph-builder.cc
+index 483fd7bfd27..3db1f4d46bc 100644
+--- a/src/maglev/maglev-graph-builder.cc
++++ b/src/maglev/maglev-graph-builder.cc
+@@ -1959,6 +1959,17 @@ MaybeReduceResult MaglevGraphBuilder::TryBuildNewConsString(
+   if (!v8_flags.maglev_cons_string_elision) {
+     return ReduceResult::Fail();
+   }
++  auto is_tainted_string_constant = [this](ValueNode* s) -> bool {
++    if (auto constant = TryGetConstant<String>(s)) {
++      if (constant->IsString()) {
++        return constant->AsString().object()->IsTainted();
++      }
++    }
++    return false;
++  };
++  if (is_tainted_string_constant(left) || is_tainted_string_constant(right)) {
++    return ReduceResult::Fail();
++  }
+ 
+   DCHECK(NodeTypeIs(GetType(left), NodeType::kString));
+   DCHECK(NodeTypeIs(GetType(right), NodeType::kString));
+@@ -5137,6 +5148,7 @@ MaybeReduceResult MaglevGraphBuilder::TryBuildElementAccessOnString(
+     ValueNode* object, ValueNode* index_object,
+     const compiler::ElementAccessFeedback& access_feedback,
+     compiler::KeyedAccessMode const& keyed_mode) {
++  if (v8_flags.taint_disable_jit_string_inlining) return {};
+   // Strings are immutable and `in` cannot be used on strings
+   if (keyed_mode.access_mode() != compiler::AccessMode::kLoad) {
+     return {};
+@@ -9027,6 +9039,7 @@ MaybeReduceResult MaglevGraphBuilder::TryReduceConstantStringAt(
+ 
+ MaybeReduceResult MaglevGraphBuilder::TryReduceStringPrototypeSubstring(
+     compiler::JSFunctionRef target, CallArguments& args) {
++  if (v8_flags.taint_disable_jit_string_inlining) return {};
+   if (!CanSpeculateCall()) return {};
+ 
+   if (args.count() != 1 && args.count() != 2) return {};
+@@ -9233,6 +9246,7 @@ MaybeReduceResult MaglevGraphBuilder::TryReduceStringPrototypeCodePointAt(
+ 
+ MaybeReduceResult MaglevGraphBuilder::TryReduceStringPrototypeSlice(
+     compiler::JSFunctionRef target, CallArguments& args) {
++  if (v8_flags.taint_disable_jit_string_inlining) return {};
+   if (!CanSpeculateCall()) return {};
+ 
+   ValueNode* receiver = GetValueOrUndefined(args.receiver());
+diff --git a/src/maglev/maglev-ir.cc b/src/maglev/maglev-ir.cc
+index 61aa753278b..7e444ce0750 100644
+--- a/src/maglev/maglev-ir.cc
++++ b/src/maglev/maglev-ir.cc
+@@ -5868,6 +5868,10 @@ void StringAt::GenerateCode(MaglevAssembler* masm,
+   __ StringFromCharCode(save_registers, &cached_one_byte_string, result_string,
+                         char_code, scratch,
+                         MaglevAssembler::CharCodeMaskMode::kValueIsInRange);
++  Label taint_done;
++  __ JumpIfNotObjectType(result_string, SEQ_TWO_BYTE_STRING_TYPE, &taint_done);
++  __ StoreInt32Field(result_string, offsetof(String, taint_), 0);
++  __ bind(&taint_done);
+ }
+ 
+ 
+diff --git a/src/maglev/maglev-ir.h b/src/maglev/maglev-ir.h
+index 47b0b4a6e55..69727353dd1 100644
+--- a/src/maglev/maglev-ir.h
++++ b/src/maglev/maglev-ir.h
+@@ -6356,7 +6356,9 @@ struct VirtualNameShape : VirtualPrimitiveHeapObjectShape {
+ 
+ struct VirtualStringShape : VirtualNameShape {
+   using T = String;
+-#define FIELD_LIST(V) V(length, offsetof(T, length_), vobj::FieldType::kInt32)
++#define FIELD_LIST(V)                                      \
++  V(length, offsetof(T, length_), vobj::FieldType::kInt32) \
++  V(taint, offsetof(T, taint_), vobj::FieldType::kInt32)
+   DEF_SHAPE(VirtualNameShape, FIELD_LIST);
+ #undef FIELD_LIST
+ };
+diff --git a/src/maglev/maglev-reducer-inl.h b/src/maglev/maglev-reducer-inl.h
+index 61dc0757864..3a2685fa586 100644
+--- a/src/maglev/maglev-reducer-inl.h
++++ b/src/maglev/maglev-reducer-inl.h
+@@ -5012,7 +5012,7 @@ VirtualObject* MaglevReducer<BaseT>::CreateConsString(ValueNode* map,
+                                                       ValueNode* second) {
+   using Shape = VirtualConsStringShape;
+   int slot_count = Shape::header_slot_count;
+-  SBXCHECK_EQ(slot_count, 5);
++  SBXCHECK_EQ(slot_count, 6);
+   VirtualObject* vobj = NodeBase::New<VirtualObject>(
+       zone(), 0, NewObjectId(), zone(), &Shape::kObjectLayout,
+       compiler::OptionalMapRef{}, slot_count);
+@@ -5020,6 +5020,7 @@ VirtualObject* MaglevReducer<BaseT>::CreateConsString(ValueNode* map,
+   vobj->set(offsetof(ConsString, raw_hash_field_),
+             GetInt32Constant(Name::kEmptyHashField));
+   vobj->set(offsetof(ConsString, length_), length);
++  vobj->set(offsetof(String, taint_), GetInt32Constant(0));
+   vobj->set(offsetof(ConsString, first_), first);
+   vobj->set(offsetof(ConsString, second_), second);
+   return vobj;
+diff --git a/src/objects/elements.cc b/src/objects/elements.cc
+index 09c025214db..08443502f48 100644
+--- a/src/objects/elements.cc
++++ b/src/objects/elements.cc
+@@ -5642,6 +5642,10 @@ class StringWrapperElementsAccessor
+     DirectHandle<String> string(GetString(*holder), isolate);
+     uint32_t length = string->length();
+     if (entry.as_uint32() < length) {
++      if (string->IsTainted()) {
++        return isolate->factory()->NewProperSubString(string, entry.as_uint32(),
++                                                      entry.as_uint32() + 1);
++      }
+       return isolate->factory()->LookupSingleCharacterStringFromCode(
+           String::Flatten(isolate, string)->Get(entry.as_uint32()));
+     }
+diff --git a/src/objects/intl-objects.cc b/src/objects/intl-objects.cc
+index af6c577f98a..91630cf4435 100644
+--- a/src/objects/intl-objects.cc
++++ b/src/objects/intl-objects.cc
+@@ -38,6 +38,7 @@
+ #include "src/objects/smi.h"
+ #include "src/objects/string.h"
+ #include "src/strings/string-case.h"
++#include "src/strings/taint.h"
+ #pragma GCC diagnostic push
+ #pragma GCC diagnostic ignored "-Wshadow"
+ #include "unicode/basictz.h"
+@@ -360,6 +361,7 @@ MaybeHandle<String> LocaleConvertCase(Isolate* isolate, DirectHandle<String> s,
+   // Only in rare cases, it'll be shorter than the destination buffer and
+   // |result| has to be truncated.
+   DCHECK(U_SUCCESS(status));
++  PropagateTaint(isolate, *s, *result, "toLocaleCase");
+   if (V8_LIKELY(status == U_STRING_NOT_TERMINATED_WARNING)) {
+     DCHECK(dest_length == result->length());
+     return result;
+@@ -2733,7 +2735,12 @@ MaybeDirectHandle<String> Intl::Normalize(Isolate* isolate,
+     THROW_NEW_ERROR(isolate, NewTypeError(MessageTemplate::kIcuError));
+   }
+ 
+-  return Intl::ToString(isolate, result);
++  DirectHandle<String> normalized;
++  ASSIGN_RETURN_ON_EXCEPTION(isolate, normalized,
++                             Intl::ToString(isolate, result));
++  PropagateTaint(isolate, *string, *normalized, "normalize",
++                 {TaintStringToU16(*string)});
++  return normalized;
+ }
+ 
+ // ICUTimezoneCache calls out to ICU for TimezoneCache
+diff --git a/src/objects/lookup.cc b/src/objects/lookup.cc
+index 34a116268e1..27eab58744b 100644
+--- a/src/objects/lookup.cc
++++ b/src/objects/lookup.cc
+@@ -1141,6 +1141,11 @@ Handle<Object> LookupIterator::GetStringPropertyValue(
+     DirectHandle<String> string = Cast<String>(lookup_start_object_);
+     // The state guarantees that it's an access within bounds.
+     DCHECK_LT(index_, string->length());
++    if (string->IsTainted()) {
++      return isolate_->factory()->NewProperSubString(
++          string, static_cast<uint32_t>(index_),
++          static_cast<uint32_t>(index_) + 1);
++    }
+     return isolate_->factory()->LookupSingleCharacterStringFromCode(
+         String::Flatten(isolate_, string)->Get(static_cast<uint32_t>(index_)));
+   }
+diff --git a/src/objects/objects-body-descriptors-inl.h b/src/objects/objects-body-descriptors-inl.h
+index 200448caa37..e2a5a3fa69c 100644
+--- a/src/objects/objects-body-descriptors-inl.h
++++ b/src/objects/objects-body-descriptors-inl.h
+@@ -1693,12 +1693,23 @@ class WasmMemoryObject::BodyDescriptor final : public BodyDescriptorBase {
+ };
+ #endif  // V8_ENABLE_WEBASSEMBLY
+ 
++template <int start_offset, int size>
++template <typename ObjectVisitor>
++void StringTaintFixedBodyDescriptor<start_offset, size>::IterateBody(
++    Tagged<Map> map, Tagged<HeapObject> obj, int object_size,
++    ObjectVisitor* v) {
++  Tagged<String> string = UncheckedCast<String>(obj);
++  v->VisitExternalPointer(obj, ExternalPointerSlot(&string->taint_));
++  IteratePointers(obj, start_offset, size, v);
++}
++
+ class ExternalString::BodyDescriptor final : public BodyDescriptorBase {
+  public:
+   template <typename ObjectVisitor>
+   static inline void IterateBody(Tagged<Map> map, Tagged<HeapObject> obj,
+                                  int object_size, ObjectVisitor* v) {
+     Tagged<ExternalString> string = UncheckedCast<ExternalString>(obj);
++    v->VisitExternalPointer(obj, ExternalPointerSlot(&string->taint_));
+     v->VisitExternalPointer(obj, ExternalPointerSlot(&string->resource_));
+     if (string->is_uncached()) return;
+     v->VisitExternalPointer(obj, ExternalPointerSlot(&string->resource_data_));
+diff --git a/src/objects/objects-body-descriptors.h b/src/objects/objects-body-descriptors.h
+index 3aafaf2d856..55a644ddbdb 100644
+--- a/src/objects/objects-body-descriptors.h
++++ b/src/objects/objects-body-descriptors.h
+@@ -168,6 +168,20 @@ using FixedBodyDescriptorFor =
+     FixedBodyDescriptor<T::kStartOfStrongFieldsOffset,
+                         T::kEndOfStrongFieldsOffset, T::kSize>;
+ 
++template <int start_offset, int size>
++class StringTaintFixedBodyDescriptor : public BodyDescriptorBase {
++ public:
++  static constexpr int kSize = size;
++
++  template <typename ObjectVisitor>
++  static inline void IterateBody(Tagged<Map> map, Tagged<HeapObject> obj,
++                                 int object_size, ObjectVisitor* v);
++
++  static inline int SizeOf(Tagged<Map> map, Tagged<HeapObject> object) {
++    return kSize;
++  }
++};
++
+ // This class describes a body of an object in which all pointer fields are
+ // located in the [start_offset, object_size) interval.
+ // All pointers have to be strong.
+diff --git a/src/objects/objects.cc b/src/objects/objects.cc
+index 7a3cf8f92fe..e5a06810aa2 100644
+--- a/src/objects/objects.cc
++++ b/src/objects/objects.cc
+@@ -91,6 +91,7 @@
+ #include "src/snapshot/deserializer.h"
+ #include "src/strings/string-builder-inl.h"
+ #include "src/strings/string-stream.h"
++#include "src/strings/taint.h"
+ #include "src/strings/unicode-inl.h"
+ #include "src/utils/identity-map.h"
+ #include "src/utils/ostreams.h"
+@@ -4310,12 +4311,15 @@ namespace {
+ template <typename sinkchar>
+ void WriteChunkListToFlat(Tagged<FixedArray> chunk_list_head,
+                           uint32_t last_chunk_length, Tagged<String> separator,
+-                          sinkchar* sink, uint32_t sink_length) {
++                          sinkchar* sink, uint32_t sink_length,
++                          StringTaint* combined_taint) {
+   DisallowGarbageCollection no_gc;
+ #ifdef DEBUG
+   sinkchar* sink_end = sink + sink_length;
+ #endif
+ 
++  const sinkchar* sink_start = sink;
++  const bool separator_is_tainted = separator->IsTainted();
+   const uint32_t separator_length = separator->length();
+   const bool use_one_byte_separator_fast_path =
+       separator_length == 1 && sizeof(sinkchar) == 1 &&
+@@ -4382,12 +4386,22 @@ void WriteChunkListToFlat(Tagged<FixedArray> chunk_list_head,
+         // Fast path for single character, single byte separators.
+         if (use_one_byte_separator_fast_path) {
+           DCHECK_LE(sink + num_separators, sink_end);
++          if (separator_is_tainted) {
++            uint32_t base = static_cast<uint32_t>(sink - sink_start);
++            for (uint32_t k = 0; k < num_separators; k++) {
++              combined_taint->concat(separator->GetTaint(), base + k);
++            }
++          }
+           memset(sink, separator_one_char, num_separators);
+           DCHECK_EQ(separator_length, 1);
+           sink += num_separators;
+         } else {
+           for (uint32_t j = 0; j < num_separators; j++) {
+             DCHECK_LE(sink + separator_length, sink_end);
++            if (separator_is_tainted) {
++              combined_taint->concat(separator->GetTaint(),
++                                     static_cast<uint32_t>(sink - sink_start));
++            }
+             String::WriteToFlat(separator, sink, 0, separator_length);
+             sink += separator_length;
+           }
+@@ -4431,6 +4445,10 @@ void WriteChunkListToFlat(Tagged<FixedArray> chunk_list_head,
+         const uint32_t string_length = string->length();
+ 
+         DCHECK(string_length == 0 || sink < sink_end);
++        if (string->IsTainted()) {
++          combined_taint->concat(string->GetTaint(),
++                                 static_cast<uint32_t>(sink - sink_start));
++        }
+         String::WriteToFlat(string, sink, 0, string_length);
+         sink += string_length;
+ 
+@@ -4468,15 +4486,20 @@ Address JSArray::ArrayJoinConcatToSequentialString(
+          StringShape(dest).IsSequentialTwoByte());
+ 
+   uint32_t last_chunk_length = static_cast<uint32_t>(raw_last_chunk_length);
++  StringTaint combined_taint;
+   if (StringShape(dest).IsSequentialOneByte()) {
+     WriteChunkListToFlat(chunk_list_head, last_chunk_length, separator,
+                          Cast<SeqOneByteString>(dest)->GetChars(no_gc),
+-                         dest->length());
++                         dest->length(), &combined_taint);
+   } else {
+     DCHECK(StringShape(dest).IsSequentialTwoByte());
+     WriteChunkListToFlat(chunk_list_head, last_chunk_length, separator,
+                          Cast<SeqTwoByteString>(dest)->GetChars(no_gc),
+-                         dest->length());
++                         dest->length(), &combined_taint);
++  }
++  if (combined_taint.hasTaint()) {
++    combined_taint.extend(TaintOperation("Array.join"));
++    dest->SetTaint(isolate, combined_taint);
+   }
+   return dest.ptr();
+ }
+diff --git a/src/objects/objects.h b/src/objects/objects.h
+index 53945dacdb4..d2d5fd814b5 100644
+--- a/src/objects/objects.h
++++ b/src/objects/objects.h
+@@ -698,6 +698,9 @@ inline void Print(Tagged<Object> obj, std::ostream& os) { ShortPrint(obj, os); }
+ template <int start_offset, int end_offset, int size>
+ class FixedBodyDescriptor;
+ 
++template <int start_offset, int size>
++class StringTaintFixedBodyDescriptor;
++
+ template <int start_offset>
+ class FlexibleBodyDescriptor;
+ 
+diff --git a/src/objects/string-inl.h b/src/objects/string-inl.h
+index bd3af680bdb..f2342150215 100644
+--- a/src/objects/string-inl.h
++++ b/src/objects/string-inl.h
+@@ -854,6 +854,7 @@ V8_EXPORT_PRIVATE HandleType<String> String::SlowFlatten(
+ 
+   bool is_one_byte_representation;
+   uint32_t length;
++  SafeStringTaint flat_taint;
+ 
+   {
+     DisallowGarbageCollection no_gc;
+@@ -881,6 +882,14 @@ V8_EXPORT_PRIVATE HandleType<String> String::SlowFlatten(
+     }
+     length = raw_cons->length();
+     is_one_byte_representation = cons->IsOneByteRepresentation();
++
++    if (raw_cons->first()->IsTainted() || raw_cons->second()->IsTainted()) {
++      flat_taint = raw_cons->first()->GetTaint().safeCopy();
++      flat_taint.concat(raw_cons->second()->GetTaint(),
++                        raw_cons->first()->length());
++    } else if (raw_cons->IsTainted()) {
++      flat_taint = raw_cons->GetTaint().safeCopy();
++    }
+   }
+ 
+   DCHECK_EQ(length, cons->length());
+@@ -933,6 +942,9 @@ V8_EXPORT_PRIVATE HandleType<String> String::SlowFlatten(
+   }
+   DCHECK(result->IsFlat());
+   DCHECK(cons->IsFlat());
++  if (flat_taint.hasTaint()) {
++    result->SetTaint(isolate, flat_taint);
++  }
+   return result;
+ }
+ 
+@@ -1463,6 +1475,7 @@ bool ExternalString::is_uncached() const {
+ }
+ 
+ void ExternalString::InitExternalPointerFields(Isolate* isolate) {
++  taint_.store_encoded(kNullExternalPointer);
+   resource_.Init(address(), isolate, kNullAddress);
+   if (is_uncached()) return;
+   resource_data_.Init(address(), isolate, kNullAddress);
+@@ -1522,6 +1535,22 @@ void ExternalString::DisposeResource(Isolate* isolate) {
+   }
+ }
+ 
++void String::DisposeTaint(IsolateForSandbox isolate) {
++  Address value = taint_.load(isolate);
++  if (value != kNullAddress) {
++    delete reinterpret_cast<StringTaint*>(value);
++    taint_.store(isolate, kNullAddress);
++  }
++}
++
++bool String::CanCarryTaint() const {
++  Tagged<HeapObject> obj(this);
++  if (HeapLayout::InReadOnlySpace(obj)) return false;
++  if (HeapLayout::InWritableSharedSpace(obj)) return false;
++  if (StringShape(this).IsInternalized()) return false;
++  return true;
++}
++
+ const ExternalOneByteString::Resource* ExternalOneByteString::resource() const {
+   return reinterpret_cast<const Resource*>(resource_as_address());
+ }
+@@ -1941,15 +1970,27 @@ bool String::IsInPlaceInternalizableExcludingExternal(
+          !InstanceTypeChecker::IsExternalString(instance_type);
+ }
+ 
+-class SeqOneByteString::BodyDescriptor final : public DataOnlyBodyDescriptor {
++class SeqOneByteString::BodyDescriptor final : public BodyDescriptorBase {
+  public:
++  template <typename ObjectVisitor>
++  static inline void IterateBody(Tagged<Map> map, Tagged<HeapObject> obj,
++                                 int object_size, ObjectVisitor* v) {
++    Tagged<String> string = UncheckedCast<String>(obj);
++    v->VisitExternalPointer(obj, ExternalPointerSlot(&string->taint_));
++  }
+   static inline int SizeOf(Tagged<Map> map, Tagged<HeapObject> raw_object) {
+     return UncheckedCast<SeqOneByteString>(raw_object)->AllocatedSize();
+   }
+ };
+ 
+-class SeqTwoByteString::BodyDescriptor final : public DataOnlyBodyDescriptor {
++class SeqTwoByteString::BodyDescriptor final : public BodyDescriptorBase {
+  public:
++  template <typename ObjectVisitor>
++  static inline void IterateBody(Tagged<Map> map, Tagged<HeapObject> obj,
++                                 int object_size, ObjectVisitor* v) {
++    Tagged<String> string = UncheckedCast<String>(obj);
++    v->VisitExternalPointer(obj, ExternalPointerSlot(&string->taint_));
++  }
+   static inline int SizeOf(Tagged<Map> map, Tagged<HeapObject> raw_object) {
+     return UncheckedCast<SeqTwoByteString>(raw_object)->AllocatedSize();
+   }
+diff --git a/src/objects/string.cc b/src/objects/string.cc
+index ad86de5941e..737371c65a0 100644
+--- a/src/objects/string.cc
++++ b/src/objects/string.cc
+@@ -31,6 +31,7 @@
+ #include "src/strings/char-predicates.h"
+ #include "src/strings/string-builder-inl.h"
+ #include "src/strings/string-hasher.h"
++#include "src/strings/taint.h"
+ #include "src/strings/string-search.h"
+ #include "src/strings/string-stream.h"
+ #include "src/strings/unicode-inl.h"
+@@ -164,6 +165,11 @@ void String::MakeThin(IsolateT* isolate,
+   Tagged<Map> target_map = internalized->IsOneByteRepresentation()
+                                ? roots.thin_one_byte_string_map()
+                                : roots.thin_two_byte_string_map();
++  const bool had_taint = this->IsTainted();
++  SafeStringTaint carried_taint;
++  if (had_taint) {
++    carried_taint = this->GetTaint().safeCopy();
++  }
+   if (initial_shape.IsExternal()) {
+     // Notify GC about the layout change before the transition to avoid
+     // concurrent marking from observing any in-between state (e.g.
+@@ -204,6 +210,11 @@ void String::MakeThin(IsolateT* isolate,
+   } else {
+     set_map_safe_transition(isolate, target_map, kReleaseStore);
+   }
++
++  if (had_taint) {
++    internalized->SetTaint(isolate->AsIsolate(), carried_taint);
++    this->SetTaint(isolate->AsIsolate(), carried_taint);
++  }
+ }
+ 
+ template EXPORT_TEMPLATE_DEFINE(V8_EXPORT_PRIVATE) void String::MakeThin(
+@@ -1620,7 +1631,10 @@ MaybeDirectHandle<String> String::GetSubstitution(
+     const int peek_ix = next_dollar_ix + 1;
+     if (peek_ix >= replacement_length) {
+       builder.AppendCharacter('$');
+-      return builder.Finish();
++      DirectHandle<String> substituted;
++      ASSIGN_RETURN_ON_EXCEPTION(isolate, substituted, builder.Finish());
++      PropagateTaint(isolate, *replacement, *substituted, "getSubstitution");
++      return substituted;
+     }
+ 
+     int continue_from_ix = -1;
+@@ -1736,7 +1750,10 @@ MaybeDirectHandle<String> String::GetSubstitution(
+         builder.AppendString(factory->NewSubString(
+             replacement, continue_from_ix, replacement_length));
+       }
+-      return builder.Finish();
++      DirectHandle<String> substituted;
++      ASSIGN_RETURN_ON_EXCEPTION(isolate, substituted, builder.Finish());
++      PropagateTaint(isolate, *replacement, *substituted, "getSubstitution");
++      return substituted;
+     }
+ 
+     // Append substring between the previous and the next $ character.
+diff --git a/src/objects/string.h b/src/objects/string.h
+index 0348debcd0f..91757fdbb75 100644
+--- a/src/objects/string.h
++++ b/src/objects/string.h
+@@ -23,6 +23,7 @@
+ #include "src/sandbox/external-pointer.h"
+ #include "src/strings/unicode-decoder.h"
+ #include "third_party/simdutf/simdutf.h"
++#include "taint/Taint.h"
+ 
+ // Has to be the last include (doesn't have include guards):
+ #include "src/objects/object-macros.h"
+@@ -800,8 +801,21 @@ V8_OBJECT class String : public Name {
+   ComputeAndSetRawHash(const SharedStringAccessGuardIfNeeded&,
+                        bool* out_one_byte_content = nullptr);
+ 
++ public:
++  V8_EXPORT_PRIVATE void InitTaintField(IsolateForSandbox isolate);
++  V8_EXPORT_PRIVATE bool IsTainted() const;
++  V8_EXPORT_PRIVATE const StringTaint& GetTaint() const;
++  V8_EXPORT_PRIVATE void SetTaint(IsolateForSandbox isolate,
++                                  const StringTaint& taint);
++  V8_EXPORT_PRIVATE void ClearTaint(IsolateForSandbox isolate);
++  inline void DisposeTaint(IsolateForSandbox isolate);
++  inline bool CanCarryTaint() const;
++
++  static constexpr int OffsetOfTaint() { return offsetof(String, taint_); }
++
+  public:
+   uint32_t length_;
++  ExternalPointerMember<kStringTaintTag> taint_;
+ } V8_OBJECT_END;
+ 
+ template <>
+@@ -1106,8 +1120,8 @@ V8_OBJECT class ConsString : public String {
+ template <>
+ struct ObjectTraits<ConsString> {
+   using BodyDescriptor =
+-      FixedBodyDescriptor<offsetof(ConsString, first_), sizeof(ConsString),
+-                          sizeof(ConsString)>;
++      StringTaintFixedBodyDescriptor<offsetof(ConsString, first_),
++                                     sizeof(ConsString)>;
+ };
+ 
+ // The ThinString class describes string objects that are just references
+@@ -1153,8 +1167,8 @@ V8_OBJECT class ThinString : public String {
+ template <>
+ struct ObjectTraits<ThinString> {
+   using BodyDescriptor =
+-      FixedBodyDescriptor<offsetof(ThinString, actual_), sizeof(ThinString),
+-                          sizeof(ThinString)>;
++      StringTaintFixedBodyDescriptor<offsetof(ThinString, actual_),
++                                     sizeof(ThinString)>;
+ };
+ 
+ // The Sliced String class describes strings that are substrings of another
+@@ -1205,8 +1219,8 @@ V8_OBJECT class SlicedString : public String {
+ template <>
+ struct ObjectTraits<SlicedString> {
+   using BodyDescriptor =
+-      FixedBodyDescriptor<offsetof(SlicedString, parent_), sizeof(SlicedString),
+-                          sizeof(SlicedString)>;
++      StringTaintFixedBodyDescriptor<offsetof(SlicedString, parent_),
++                                     sizeof(SlicedString)>;
+ };
+ 
+ // TODO(leszeks): Build this out into a full V8 class.
+diff --git a/src/objects/string.tq b/src/objects/string.tq
+index a506d11e878..25e2ae3ae6c 100644
+--- a/src/objects/string.tq
++++ b/src/objects/string.tq
+@@ -49,6 +49,7 @@ extern class String extends Name {
+   }
+ 
+   const length: int32;
++  taint: uint32;
+ }
+ 
+ extern enum StringRepresentationTag extends uint32 {
+@@ -171,6 +172,7 @@ macro AllocateNonEmptySeqOneByteString<Iterator: type>(
+     map: kSeqOneByteStringMap,
+     raw_hash_field: kNameEmptyHashField,
+     length: Signed(length),
++    taint: 0,
+     chars: ...content
+   };
+ }
+@@ -182,6 +184,7 @@ macro AllocateNonEmptySeqTwoByteString<Iterator: type>(
+     map: kSeqTwoByteStringMap,
+     raw_hash_field: kNameEmptyHashField,
+     length: Signed(length),
++    taint: 0,
+     chars: ...content
+   };
+ }
+@@ -228,8 +231,15 @@ extern macro StringWriteToFlatTwoByte(
+     String, RawPtr<char16>, int32, int32): void;
+ extern macro IsSequentialString(String): bool;
+ 
++namespace runtime {
++extern runtime FlattenString(NoContext, String): String;
++}
++
+ // Corresponds to String::SlowFlatten in the C++ runtime.
+ builtin StringSlowFlatten(cons: ConsString): String {
++  if (cons.taint != 0 || cons.first.taint != 0 || cons.second.taint != 0) {
++    return runtime::FlattenString(kNoContext, cons);
++  }
+   // TurboFan can create cons strings with empty first parts. Make sure the
+   // cons shape is canonicalized by the end of this function (either here, if
+   // returning early, or below). Note this case is very rare in practice.
+diff --git a/src/objects/value-serializer.cc b/src/objects/value-serializer.cc
+index ebac6f77e39..afa53d55df7 100644
+--- a/src/objects/value-serializer.cc
++++ b/src/objects/value-serializer.cc
+@@ -22,6 +22,7 @@
+ #include "src/heap/factory.h"
+ #include "src/numbers/conversions.h"
+ #include "src/objects/dictionary-inl.h"
++#include "taint/Taint.h"
+ #include "src/objects/heap-number-inl.h"
+ #include "src/objects/js-array-buffer-inl.h"
+ #include "src/objects/js-array-inl.h"
+@@ -582,6 +583,13 @@ void ValueSerializer::WriteString(DirectHandle<String> string) {
+   } else {
+     UNREACHABLE();
+   }
++  if (string->IsTainted()) {
++    std::string serialized = SerializeStringTaint(string->GetTaint());
++    WriteVarint<uint32_t>(static_cast<uint32_t>(serialized.size()));
++    WriteRawBytes(serialized.data(), serialized.size());
++  } else {
++    WriteVarint<uint32_t>(0);
++  }
+ }
+ 
+ Maybe<bool> ValueSerializer::WriteJSReceiver(
+@@ -1811,7 +1819,28 @@ MaybeDirectHandle<String> ValueDeserializer::ReadOneByteString(
+   if (!ReadVarint<uint32_t>().To(&byte_length)) return {};
+   // byte_length is checked in ReadRawBytes.
+   if (!ReadRawBytes(byte_length).To(&bytes)) return {};
+-  return isolate_->factory()->NewStringFromOneByte(bytes, allocation);
++  DirectHandle<String> string;
++  if (!isolate_->factory()
++           ->NewStringFromOneByte(bytes, allocation)
++           .ToHandle(&string)) {
++    return {};
++  }
++  if (!ReadStringTaint(string)) return {};
++  return string;
++}
++
++bool ValueDeserializer::ReadStringTaint(DirectHandle<String> string) {
++  uint32_t taint_length;
++  if (!ReadVarint<uint32_t>().To(&taint_length)) return false;
++  if (taint_length == 0) return true;
++  base::Vector<const uint8_t> taint_bytes;
++  if (!ReadRawBytes(taint_length).To(&taint_bytes)) return false;
++  StringTaint taint = ParseStringTaint(std::string(
++      reinterpret_cast<const char*>(taint_bytes.begin()), taint_length));
++  if (taint.hasTaint()) {
++    string->SetTaint(isolate_, taint);
++  }
++  return true;
+ }
+ 
+ MaybeDirectHandle<String> ValueDeserializer::ReadTwoByteString(
+@@ -1827,7 +1856,11 @@ MaybeDirectHandle<String> ValueDeserializer::ReadTwoByteString(
+ 
+   // Allocate an uninitialized string so that we can do a raw memcpy into the
+   // string on the heap (regardless of alignment).
+-  if (byte_length == 0) return isolate_->factory()->empty_string();
++  if (byte_length == 0) {
++    DirectHandle<String> empty = isolate_->factory()->empty_string();
++    if (!ReadStringTaint(empty)) return {};
++    return empty;
++  }
+   DirectHandle<SeqTwoByteString> string;
+   if (!isolate_->factory()
+            ->NewRawTwoByteString(byte_length / sizeof(base::uc16), allocation)
+@@ -1837,8 +1870,11 @@ MaybeDirectHandle<String> ValueDeserializer::ReadTwoByteString(
+ 
+   // Copy the bytes directly into the new string.
+   // Warning: this uses host endianness.
+-  DisallowGarbageCollection no_gc;
+-  memcpy(string->GetChars(no_gc), bytes.begin(), bytes.length());
++  {
++    DisallowGarbageCollection no_gc;
++    memcpy(string->GetChars(no_gc), bytes.begin(), bytes.length());
++  }
++  if (!ReadStringTaint(string)) return {};
+   return string;
+ }
+ 
+diff --git a/src/objects/value-serializer.h b/src/objects/value-serializer.h
+index 0329d4e5bc2..3389ba1672d 100644
+--- a/src/objects/value-serializer.h
++++ b/src/objects/value-serializer.h
+@@ -293,6 +293,7 @@ class ValueDeserializer {
+       AllocationType allocation = AllocationType::kYoung) V8_WARN_UNUSED_RESULT;
+   MaybeDirectHandle<String> ReadTwoByteString(
+       AllocationType allocation = AllocationType::kYoung) V8_WARN_UNUSED_RESULT;
++  bool ReadStringTaint(DirectHandle<String> string) V8_WARN_UNUSED_RESULT;
+   MaybeDirectHandle<JSObject> ReadJSObject() V8_WARN_UNUSED_RESULT;
+   MaybeDirectHandle<JSArray> ReadSparseJSArray() V8_WARN_UNUSED_RESULT;
+   MaybeDirectHandle<JSArray> ReadDenseJSArray() V8_WARN_UNUSED_RESULT;
+diff --git a/src/parsing/literal-buffer.cc b/src/parsing/literal-buffer.cc
+index 32ff27eb10a..18d18f9b67a 100644
+--- a/src/parsing/literal-buffer.cc
++++ b/src/parsing/literal-buffer.cc
+@@ -17,10 +17,14 @@ namespace internal {
+ 
+ template <typename IsolateT>
+ DirectHandle<String> LiteralBuffer::Internalize(IsolateT* isolate) const {
+-  if (is_one_byte()) {
+-    return isolate->factory()->InternalizeString(one_byte_literal());
++  DirectHandle<String> result =
++      is_one_byte()
++          ? isolate->factory()->InternalizeString(one_byte_literal())
++          : isolate->factory()->InternalizeString(two_byte_literal());
++  if (taint_.hasTaint()) {
++    result->SetTaint(isolate, taint_);
+   }
+-  return isolate->factory()->InternalizeString(two_byte_literal());
++  return result;
+ }
+ 
+ template DirectHandle<String> LiteralBuffer::Internalize(
+diff --git a/src/parsing/literal-buffer.h b/src/parsing/literal-buffer.h
+index b6d7c9e00d0..7adcbb4c715 100644
+--- a/src/parsing/literal-buffer.h
++++ b/src/parsing/literal-buffer.h
+@@ -10,6 +10,7 @@
+ #include "src/base/vector.h"
+ #include "src/strings/unicode-decoder.h"
+ #include "src/utils/memcopy.h"
++#include "taint/Taint.h"
+ 
+ namespace v8 {
+ namespace internal {
+@@ -96,8 +97,13 @@ class LiteralBuffer final {
+   void Start() {
+     position_ = 0;
+     is_one_byte_ = true;
++    taint_ = SafeStringTaint();
+   }
+ 
++  const StringTaint& taint() const { return taint_; }
++  void set_taint(const StringTaint& taint) { taint_ = taint.safeCopy(); }
++  bool is_tainted() const { return taint_.hasTaint(); }
++
+   template <typename IsolateT>
+   DirectHandle<String> Internalize(IsolateT* isolate) const;
+ 
+@@ -138,6 +144,7 @@ class LiteralBuffer final {
+   base::Vector<uint8_t> backing_store_;
+   size_t position_ = 0;
+   bool is_one_byte_ = true;
++  SafeStringTaint taint_;
+ };
+ 
+ }  // namespace internal
+diff --git a/src/parsing/parser.cc b/src/parsing/parser.cc
+index a80275f796e..a293f4905e3 100644
+--- a/src/parsing/parser.cc
++++ b/src/parsing/parser.cc
+@@ -524,7 +524,12 @@ Expression* Parser::ExpressionFromLiteral(Token::Value token, int pos) {
+       return factory()->NewBigIntLiteral(
+           AstBigInt(scanner()->CurrentLiteralAsCString(zone())), pos);
+     case Token::kString: {
+-      return factory()->NewStringLiteral(GetSymbol(), pos);
++      const AstRawString* symbol = GetSymbol();
++      if (symbol->is_tainted()) {
++        return factory()->NewConsStringLiteral(
++            ast_value_factory()->NewConsString(symbol), pos);
++      }
++      return factory()->NewStringLiteral(symbol, pos);
+     }
+     default:
+       DCHECK(false);
+diff --git a/src/parsing/scanner-character-streams.cc b/src/parsing/scanner-character-streams.cc
+index d663d49c867..d8a17a36e39 100644
+--- a/src/parsing/scanner-character-streams.cc
++++ b/src/parsing/scanner-character-streams.cc
+@@ -85,6 +85,13 @@ class OnHeapStream {
+             &string_->GetChars(*no_gc)[start_offset_ + length_]};
+   }
+ 
++  StringTaint GetTaintForRange(size_t from, size_t to) const {
++    if (string_.is_null() || !string_->IsTainted()) return StringTaint();
++    return SafeStringTaint(string_->GetTaint(),
++                           static_cast<uint32_t>(start_offset_ + from),
++                           static_cast<uint32_t>(start_offset_ + to));
++  }
++
+   static const bool kCanBeCloned = false;
+   static const bool kCanAccessHeap = true;
+ 
+@@ -105,12 +112,16 @@ class ExternalStringStream {
+                        size_t length)
+       : lock_(string),
+         data_(string->GetChars() + start_offset),
+-        length_(length) {}
++        length_(length),
++        taint_(string->GetTaint()),
++        start_offset_(start_offset) {}
+ 
+   ExternalStringStream(const ExternalStringStream& other) V8_NOEXCEPT
+       : lock_(other.lock_),
+         data_(other.data_),
+-        length_(other.length_) {}
++        length_(other.length_),
++        taint_(other.taint_),
++        start_offset_(other.start_offset_) {}
+ 
+   // The no_gc argument is only here because of the templated way this class
+   // is used along with other implementations that require V8 heap access.
+@@ -119,6 +130,13 @@ class ExternalStringStream {
+     return {&data_[std::min(length_, pos)], &data_[length_]};
+   }
+ 
++  StringTaint GetTaintForRange(size_t from, size_t to) const {
++    if (!taint_.hasTaint()) return StringTaint();
++    return SafeStringTaint(taint_,
++                           static_cast<uint32_t>(start_offset_ + from),
++                           static_cast<uint32_t>(start_offset_ + to));
++  }
++
+   static const bool kCanBeCloned = true;
+   static const bool kCanAccessHeap = false;
+ 
+@@ -126,6 +144,8 @@ class ExternalStringStream {
+   ScopedExternalStringLock lock_;
+   const Char* const data_;
+   const size_t length_;
++  const StringTaint taint_;
++  const size_t start_offset_;
+ };
+ 
+ // A Char stream backed by a C array. Testing only.
+@@ -141,6 +161,10 @@ class TestingStream {
+     return {&data_[std::min(length_, pos)], &data_[length_]};
+   }
+ 
++  StringTaint GetTaintForRange(size_t from, size_t to) const {
++    return StringTaint();
++  }
++
+   static const bool kCanBeCloned = true;
+   static const bool kCanAccessHeap = false;
+ 
+@@ -154,10 +178,15 @@ template <typename Char>
+ class ChunkedStream {
+  public:
+   explicit ChunkedStream(ScriptCompiler::ExternalSourceStream* source)
+-      : source_(source), chunks_(std::make_shared<std::vector<Chunk>>()) {}
++      : source_(source),
++        taint_(source && source->GetTaintPtr()
++                   ? std::make_shared<const StringTaint>(*source->GetTaintPtr())
++                   : nullptr),
++        chunks_(std::make_shared<std::vector<Chunk>>()) {}
+ 
+   ChunkedStream(const ChunkedStream& other) V8_NOEXCEPT
+       : source_(nullptr),
++        taint_(other.taint_),
+         chunks_(other.chunks_) {}
+ 
+   // The no_gc argument is only here because of the templated way this class
+@@ -170,6 +199,12 @@ class ChunkedStream {
+     return {&chunk.data.get()[buffer_pos], &chunk.data.get()[buffer_end]};
+   }
+ 
++  StringTaint GetTaintForRange(size_t from, size_t to) const {
++    if (!taint_) return StringTaint();
++    return SafeStringTaint(*taint_, static_cast<uint32_t>(from),
++                           static_cast<uint32_t>(to));
++  }
++
+   static const bool kCanBeCloned = true;
+   static const bool kCanAccessHeap = false;
+ 
+@@ -228,6 +263,7 @@ class ChunkedStream {
+   }
+ 
+   ScriptCompiler::ExternalSourceStream* source_;
++  std::shared_ptr<const StringTaint> taint_;
+ 
+  protected:
+   std::shared_ptr<std::vector<struct Chunk>> chunks_;
+@@ -241,6 +277,9 @@ class FlexibleUnbufferedCharacterStream : public Utf16CharacterStream {
+   FlexibleUnbufferedCharacterStream(
+       size_t pos, ScriptCompiler::FlexibleExternalSourceStream* source)
+       : source_(source),
++        taint_(source && source->GetTaintPtr()
++                   ? std::make_shared<const StringTaint>(*source->GetTaintPtr())
++                   : nullptr),
+         chunks_(std::make_shared<std::vector<
+                     ScriptCompiler::FlexibleExternalSourceStream::Chunk>>()) {
+     buffer_pos_ = pos;
+@@ -258,6 +297,12 @@ class FlexibleUnbufferedCharacterStream : public Utf16CharacterStream {
+         new FlexibleUnbufferedCharacterStream(*this));
+   }
+ 
++  StringTaint GetTaintForRange(size_t from, size_t to) const override {
++    if (!taint_) return StringTaint();
++    return SafeStringTaint(*taint_, static_cast<uint32_t>(from),
++                           static_cast<uint32_t>(to));
++  }
++
+  protected:
+   bool ReadBlock(size_t position) final {
+     buffer_pos_ = position;
+@@ -301,6 +346,7 @@ class FlexibleUnbufferedCharacterStream : public Utf16CharacterStream {
+       const FlexibleUnbufferedCharacterStream& other) V8_NOEXCEPT
+       : Utf16CharacterStream(nullptr, nullptr, nullptr, other.pos()),
+         source_(other.source_),
++        taint_(other.taint_),
+         chunks_(other.chunks_) {}
+ 
+   static constexpr size_t kLocalBufferSize = 512;
+@@ -340,6 +386,7 @@ class FlexibleUnbufferedCharacterStream : public Utf16CharacterStream {
+   }
+ 
+   ScriptCompiler::FlexibleExternalSourceStream* source_;
++  std::shared_ptr<const StringTaint> taint_;
+   std::shared_ptr<
+       std::vector<ScriptCompiler::FlexibleExternalSourceStream::Chunk>>
+       chunks_;
+@@ -366,6 +413,10 @@ class BufferedCharacterStream : public Utf16CharacterStream {
+         new BufferedCharacterStream<ByteStream>(*this));
+   }
+ 
++  StringTaint GetTaintForRange(size_t from, size_t to) const override {
++    return byte_stream_.GetTaintForRange(from, to);
++  }
++
+  protected:
+   bool ReadBlock(size_t position) final {
+     buffer_pos_ = position;
+@@ -422,6 +473,10 @@ class UnbufferedCharacterStream : public Utf16CharacterStream {
+         new UnbufferedCharacterStream<ByteStream>(*this));
+   }
+ 
++  StringTaint GetTaintForRange(size_t from, size_t to) const override {
++    return byte_stream_.GetTaintForRange(from, to);
++  }
++
+  protected:
+   bool ReadBlock(size_t position) final {
+     buffer_pos_ = position;
+@@ -645,7 +700,11 @@ class Utf8ExternalStreamingStream final : public BufferedUtf16CharacterStream {
+       ScriptCompiler::ExternalSourceStream* source_stream)
+       : chunks_(std::make_shared<std::vector<Chunk>>()),
+         current_({0, {0, 0, 0, unibrow::Utf8::State::kAccept}}),
+-        source_stream_(source_stream) {}
++        source_stream_(source_stream),
++        taint_(source_stream && source_stream->GetTaintPtr()
++                   ? std::make_shared<const StringTaint>(
++                         *source_stream->GetTaintPtr())
++                   : nullptr) {}
+   ~Utf8ExternalStreamingStream() final = default;
+ 
+   bool can_access_heap() const final { return false; }
+@@ -657,6 +716,12 @@ class Utf8ExternalStreamingStream final : public BufferedUtf16CharacterStream {
+         new Utf8ExternalStreamingStream(*this));
+   }
+ 
++  StringTaint GetTaintForRange(size_t from, size_t to) const override {
++    if (!taint_) return StringTaint();
++    return SafeStringTaint(*taint_, static_cast<uint32_t>(from),
++                           static_cast<uint32_t>(to));
++  }
++
+  protected:
+   size_t FillBuffer(size_t position) final;
+ 
+@@ -694,7 +759,8 @@ class Utf8ExternalStreamingStream final : public BufferedUtf16CharacterStream {
+   Utf8ExternalStreamingStream(const Utf8ExternalStreamingStream& source_stream)
+       V8_NOEXCEPT : chunks_(source_stream.chunks_),
+                     current_({0, {0, 0, 0, unibrow::Utf8::State::kAccept}}),
+-                    source_stream_(nullptr) {}
++                    source_stream_(nullptr),
++                    taint_(source_stream.taint_) {}
+ 
+   // Within the current chunk, skip forward from current_ towards position.
+   bool SkipToPosition(size_t position);
+@@ -711,6 +777,7 @@ class Utf8ExternalStreamingStream final : public BufferedUtf16CharacterStream {
+   std::shared_ptr<std::vector<Chunk>> chunks_;
+   Position current_;
+   ScriptCompiler::ExternalSourceStream* source_stream_;
++  std::shared_ptr<const StringTaint> taint_;
+ };
+ 
+ bool Utf8ExternalStreamingStream::SkipToPosition(size_t position) {
+diff --git a/src/parsing/scanner.cc b/src/parsing/scanner.cc
+index 374fc4616e1..bef91a7bf4b 100644
+--- a/src/parsing/scanner.cc
++++ b/src/parsing/scanner.cc
+@@ -556,6 +556,7 @@ Token::Value Scanner::ScanString() {
+   base::uc32 quote = c0_;
+ 
+   next().literal_chars.Start();
++  int taint_beg = source_pos() + 1;
+   while (true) {
+     // Consumed ASCII characters are bulk-appended to the literal buffer via
+     // the range callback. Non-ASCII characters terminate the range scan and
+@@ -579,6 +580,12 @@ Token::Value Scanner::ScanString() {
+     }
+ 
+     if (c0_ == quote) {
++      int taint_end = source_pos();
++      StringTaint literal_taint = source_->GetTaintForRange(
++          static_cast<size_t>(taint_beg), static_cast<size_t>(taint_end));
++      if (literal_taint.hasTaint()) {
++        next().literal_chars.set_taint(literal_taint);
++      }
+       Advance();
+       return Token::kString;
+     }
+@@ -1125,18 +1132,28 @@ std::optional<regexp::Flags> Scanner::ScanRegExpFlags() {
+ 
+ const AstRawString* Scanner::CurrentSymbol(
+     AstValueFactory* ast_value_factory) const {
+-  if (is_literal_one_byte()) {
+-    return ast_value_factory->GetOneByteString(literal_one_byte_string());
++  const AstRawString* symbol =
++      is_literal_one_byte()
++          ? ast_value_factory->GetOneByteString(literal_one_byte_string())
++          : ast_value_factory->GetTwoByteString(literal_two_byte_string());
++  const LiteralBuffer& literal = current().literal_chars;
++  if (literal.is_tainted()) {
++    symbol = ast_value_factory->CloneTaintedString(symbol, literal.taint());
+   }
+-  return ast_value_factory->GetTwoByteString(literal_two_byte_string());
++  return symbol;
+ }
+ 
+ const AstRawString* Scanner::NextSymbol(
+     AstValueFactory* ast_value_factory) const {
+-  if (is_next_literal_one_byte()) {
+-    return ast_value_factory->GetOneByteString(next_literal_one_byte_string());
++  const AstRawString* symbol =
++      is_next_literal_one_byte()
++          ? ast_value_factory->GetOneByteString(next_literal_one_byte_string())
++          : ast_value_factory->GetTwoByteString(next_literal_two_byte_string());
++  const LiteralBuffer& literal = next().literal_chars;
++  if (literal.is_tainted()) {
++    symbol = ast_value_factory->CloneTaintedString(symbol, literal.taint());
+   }
+-  return ast_value_factory->GetTwoByteString(next_literal_two_byte_string());
++  return symbol;
+ }
+ 
+ const AstRawString* Scanner::CurrentRawSymbol(
+diff --git a/src/parsing/scanner.h b/src/parsing/scanner.h
+index 087963d1ad3..a8903d9ce49 100644
+--- a/src/parsing/scanner.h
++++ b/src/parsing/scanner.h
+@@ -43,6 +43,10 @@ class Utf16CharacterStream {
+ 
+   virtual ~Utf16CharacterStream() = default;
+ 
++  virtual StringTaint GetTaintForRange(size_t from_pos, size_t to_pos) const {
++    return StringTaint();
++  }
++
+   V8_INLINE void set_parser_error() {
+     // source_pos() returns one previous position of the cursor.
+     // Offset 1 cancels this out and makes it return exactly buffer_end_.
+diff --git a/src/runtime/runtime-compiler.cc b/src/runtime/runtime-compiler.cc
+index d7acc9c7f29..64d23c3bb16 100644
+--- a/src/runtime/runtime-compiler.cc
++++ b/src/runtime/runtime-compiler.cc
+@@ -18,6 +18,7 @@
+ #include "src/objects/objects-inl.h"
+ #include "src/objects/shared-function-info.h"
+ #include "src/runtime/runtime-utils.h"
++#include "src/strings/taint.h"
+ 
+ #ifdef V8_ENABLE_SPARKPLUG_PLUS
+ #include "src/common/code-memory-access.h"
+@@ -794,6 +795,10 @@ static Tagged<Object> CompileGlobalEval(
+     int eval_scope_info_index, int eval_position) {
+   DirectHandle<NativeContext> native_context = isolate->native_context();
+ 
++  if (IsString(*source_object)) {
++    ReportTaintSink(isolate, Cast<String>(*source_object), "eval");
++  }
++
+   // Check if native context allows code generation from
+   // strings. Throw an exception if it doesn't.
+   MaybeDirectHandle<String> source;
+diff --git a/src/runtime/runtime-function.cc b/src/runtime/runtime-function.cc
+index 47330f6bc4a..9d7a7e2cfc6 100644
+--- a/src/runtime/runtime-function.cc
++++ b/src/runtime/runtime-function.cc
+@@ -4,11 +4,40 @@
+ 
+ #include "src/builtins/accessors.h"
+ #include "src/execution/isolate-inl.h"
++#include "src/objects/string.h"
+ #include "src/roots/roots-inl.h"
++#include "src/strings/taint.h"
+ 
+ namespace v8 {
+ namespace internal {
+ 
++RUNTIME_FUNCTION(Runtime_MarkTaintedFunctionArguments) {
++  HandleScope scope(isolate);
++  auto IntToU16 = [](int value) {
++    std::string digits = std::to_string(value);
++    return std::u16string(digits.begin(), digits.end());
++  };
++  TaintLocation location = TaintLocationFromStack(isolate);
++  int length = args.length();
++  for (int i = 0; i < length; i++) {
++    Tagged<Object> arg = args[i];
++    if (!IsString(arg)) {
++      continue;
++    }
++    Tagged<String> str = Cast<String>(arg);
++    if (!str->IsTainted()) {
++      continue;
++    }
++    StringTaint taint = str->GetTaint();
++    taint.extend(TaintOperation(
++        "function", location,
++        {std::u16string(u"unknown"), std::u16string(u"unknown"), IntToU16(i),
++         IntToU16(length)}));
++    str->SetTaint(isolate, taint);
++  }
++  return ReadOnlyRoots(isolate).undefined_value();
++}
++
+ // TODO(5530): Remove once uses in debug.js are gone.
+ RUNTIME_FUNCTION(Runtime_FunctionGetScriptSource) {
+   HandleScope scope(isolate);
+diff --git a/src/runtime/runtime-object.cc b/src/runtime/runtime-object.cc
+index 7d01e1171cf..e6525279a18 100644
+--- a/src/runtime/runtime-object.cc
++++ b/src/runtime/runtime-object.cc
+@@ -704,6 +704,9 @@ RUNTIME_FUNCTION(Runtime_GetProperty) {
+     uint32_t smi_index = Cast<Smi>(*key_obj).value();
+     if (smi_index < str->length()) {
+       Factory* factory = isolate->factory();
++      if (str->IsTainted()) {
++        return *factory->NewProperSubString(str, smi_index, smi_index + 1);
++      }
+       return *factory->LookupSingleCharacterStringFromCode(
+           String::Flatten(isolate, str)->Get(smi_index));
+     }
+diff --git a/src/runtime/runtime-regexp.cc b/src/runtime/runtime-regexp.cc
+index 36382085238..4ea94277f62 100644
+--- a/src/runtime/runtime-regexp.cc
++++ b/src/runtime/runtime-regexp.cc
+@@ -19,6 +19,7 @@
+ #include "src/regexp/regexp.h"
+ #include "src/strings/string-builder-inl.h"
+ #include "src/strings/string-search.h"
++#include "src/strings/taint.h"
+ 
+ namespace v8 {
+ namespace internal {
+@@ -741,7 +742,13 @@ StringReplaceGlobalRegExpWithString(
+   RegExp::SetLastMatchInfo(isolate, last_match_info, subject, capture_count,
+                            runner.LastSuccessfulMatch());
+ 
+-  RETURN_RESULT_OR_FAILURE(isolate, builder.ToString());
++  DirectHandle<String> replaced;
++  ASSIGN_RETURN_FAILURE_ON_EXCEPTION(isolate, replaced, builder.ToString());
++  if (subject->IsTainted() || replacement->IsTainted()) {
++    Tagged<String> src = subject->IsTainted() ? *subject : *replacement;
++    PropagateTaint(isolate, src, *replaced, "replace");
++  }
++  return *replaced;
+ }
+ 
+ template <typename ResultSeqString>
+@@ -861,7 +868,9 @@ RUNTIME_FUNCTION(Runtime_StringSplit) {
+   int pattern_length = pattern->length();
+   CHECK_LT(0, pattern_length);
+ 
+-  if (limit == 0xFFFFFFFFu) {
++  bool subject_tainted = subject->IsTainted();
++
++  if (limit == 0xFFFFFFFFu && !subject_tainted) {
+     Tagged<FixedArray> last_match_cache_unused;
+     DirectHandle<Object> cached_answer(
+         regexp::ResultsCache::Lookup(
+@@ -880,12 +889,12 @@ RUNTIME_FUNCTION(Runtime_StringSplit) {
+   // isn't empty, we can never create more parts than ~half the length
+   // of the subject.
+ 
+-  subject = String::Flatten(isolate, subject);
++  DirectHandle<String> flat_subject = String::Flatten(isolate, subject);
+   pattern = String::Flatten(isolate, pattern);
+ 
+   std::vector<int>* indices = GetRewoundRegexpIndicesList(isolate);
+ 
+-  FindStringIndicesDispatch(isolate, *subject, *pattern, indices, limit,
++  FindStringIndicesDispatch(isolate, *flat_subject, *pattern, indices, limit,
+                             first_index);
+ 
+   if (static_cast<uint32_t>(indices->size()) < limit) {
+@@ -914,12 +923,18 @@ RUNTIME_FUNCTION(Runtime_StringSplit) {
+       int part_end = indices->at(i);
+       DirectHandle<String> substring =
+           isolate->factory()->NewProperSubString(subject, part_start, part_end);
++      if (substring->IsTainted()) {
++        std::string index = std::to_string(i);
++        MarkTaintOperation(isolate, *substring, "split",
++                           {TaintStringToU16(*pattern),
++                            std::u16string(index.begin(), index.end())});
++      }
+       elements->set(i, *substring);
+       part_start = part_end + pattern_length;
+     }
+   }
+ 
+-  if (limit == 0xFFFFFFFFu) {
++  if (limit == 0xFFFFFFFFu && !subject_tainted) {
+     if (result->HasObjectElements()) {
+       regexp::ResultsCache::Enter(
+           isolate, subject, pattern, elements,
+diff --git a/src/runtime/runtime-strings.cc b/src/runtime/runtime-strings.cc
+index 86fafdb8698..de36a9f87a8 100644
+--- a/src/runtime/runtime-strings.cc
++++ b/src/runtime/runtime-strings.cc
+@@ -12,11 +12,139 @@
+ #include "src/objects/smi.h"
+ #include "src/runtime/runtime-utils.h"
+ #include "src/strings/string-builder-inl.h"
++#include "src/strings/taint.h"
+ #include "src/strings/unicode-inl.h"
+ 
+ namespace v8 {
+ namespace internal {
+ 
++RUNTIME_FUNCTION(Runtime_TaintArrayJoin) {
++  HandleScope scope(isolate);
++  DCHECK_EQ(1, args.length());
++  DirectHandle<String> str = args.at<String>(0);
++  if (str->IsTainted()) {
++    MarkTaintOperation(isolate, *str, "Array.join");
++  }
++  return *str;
++}
++
++RUNTIME_FUNCTION(Runtime_MarkTaintOperationById) {
++  HandleScope scope(isolate);
++  DCHECK_EQ(2, args.length());
++  DirectHandle<String> str = args.at<String>(0);
++  int id = args.smi_value_at(1);
++  if (!str->IsTainted()) {
++    return *str;
++  }
++  const char* name = nullptr;
++  switch (id) {
++    case 0: name = "substr"; break;
++    case 1: name = "repeat"; break;
++    case 2: name = "split"; break;
++    case 3: name = "toLowerCase"; break;
++    case 4: name = "toUpperCase"; break;
++    case 5: name = "trim"; break;
++    case 6: name = "trimStart"; break;
++    case 7: name = "trimEnd"; break;
++    case 8: name = "substring"; break;
++    case 9: name = "slice"; break;
++    case 10: name = "replace"; break;
++    case 11: name = "charAt"; break;
++    case 12: name = "split"; break;
++    default: return *str;
++  }
++  DirectHandle<String> flat = String::Flatten(isolate, str);
++  uint32_t len = flat->length();
++  DirectHandle<String> copy;
++  if (flat->IsOneByteRepresentation()) {
++    DirectHandle<SeqOneByteString> seq;
++    ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
++        isolate, seq, isolate->factory()->NewRawOneByteString(len));
++    DisallowGarbageCollection no_gc;
++    String::WriteToFlat(*flat, seq->GetChars(no_gc), 0, len);
++    copy = seq;
++  } else {
++    DirectHandle<SeqTwoByteString> seq;
++    ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
++        isolate, seq, isolate->factory()->NewRawTwoByteString(len));
++    DisallowGarbageCollection no_gc;
++    String::WriteToFlat(*flat, seq->GetChars(no_gc), 0, len);
++    copy = seq;
++  }
++  SafeStringTaint taint = str->GetTaint().safeCopy();
++  taint.extend(TaintOperation(name));
++  copy->SetTaint(isolate, taint);
++  return *copy;
++}
++
++RUNTIME_FUNCTION(Runtime_PropagateTaintById) {
++  HandleScope scope(isolate);
++  DCHECK_EQ(3, args.length());
++  DirectHandle<String> source = args.at<String>(0);
++  DirectHandle<String> result = args.at<String>(1);
++  int id = args.smi_value_at(2);
++  if (!source->IsTainted() || result->length() == 0) {
++    return *result;
++  }
++  const char* name = nullptr;
++  switch (id) {
++    case 3: name = "toLowerCase"; break;
++    case 4: name = "toUpperCase"; break;
++    default: return *result;
++  }
++  DirectHandle<String> target = result;
++  DirectHandle<String> source_flat = String::Flatten(isolate, source);
++  if (*result == *source || *result == *source_flat) {
++    DirectHandle<String> flat = String::Flatten(isolate, result);
++    uint32_t len = flat->length();
++    if (flat->IsOneByteRepresentation()) {
++      DirectHandle<SeqOneByteString> seq;
++      ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
++          isolate, seq, isolate->factory()->NewRawOneByteString(len));
++      DisallowGarbageCollection no_gc;
++      String::WriteToFlat(*flat, seq->GetChars(no_gc), 0, len);
++      target = seq;
++    } else {
++      DirectHandle<SeqTwoByteString> seq;
++      ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
++          isolate, seq, isolate->factory()->NewRawTwoByteString(len));
++      DisallowGarbageCollection no_gc;
++      String::WriteToFlat(*flat, seq->GetChars(no_gc), 0, len);
++      target = seq;
++    }
++  }
++  SafeStringTaint taint = source->GetTaint().safeCopy();
++  taint.extend(TaintOperation(name));
++  target->SetTaint(isolate, taint);
++  return *target;
++}
++
++RUNTIME_FUNCTION(Runtime_TaintStringToList) {
++  HandleScope scope(isolate);
++  DCHECK_EQ(1, args.length());
++  DirectHandle<String> subject = args.at<String>(0);
++  uint32_t length = subject->length();
++  DirectHandle<FixedArray> elements =
++      isolate->factory()->NewFixedArray(static_cast<int>(length));
++  DirectHandle<String> s = String::Flatten(isolate, subject);
++  uint32_t count = 0;
++  for (uint32_t i = 0; i < length;) {
++    HandleScope loop_scope(isolate);
++    uint32_t char_count = 1;
++    if (unibrow::Utf16::IsLeadSurrogate(s->Get(i)) && i + 1 < length &&
++        unibrow::Utf16::IsTrailSurrogate(s->Get(i + 1))) {
++      char_count = 2;
++    }
++    DirectHandle<String> part =
++        isolate->factory()->NewProperSubString(subject, i, i + char_count);
++    elements->set(static_cast<int>(count), *part);
++    count++;
++    i += char_count;
++  }
++  return *isolate->factory()->NewJSArrayWithElements(elements, PACKED_ELEMENTS,
++                                                     count);
++}
++
+ RUNTIME_FUNCTION(Runtime_GetSubstitution) {
+   HandleScope scope(isolate);
+   DCHECK_EQ(5, args.length());
+@@ -159,8 +287,11 @@ RUNTIME_FUNCTION(Runtime_StringAdd) {
+   DCHECK_EQ(2, args.length());
+   DirectHandle<String> str1 = args.at<String>(0);
+   DirectHandle<String> str2 = args.at<String>(1);
+-  RETURN_RESULT_OR_FAILURE(isolate,
+-                           isolate->factory()->NewConsString(str1, str2));
++  DirectHandle<String> result;
++  ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
++      isolate, result, isolate->factory()->NewConsString(str1, str2));
++  PropagateTaintConcat(isolate, *str1, *str2, *result, "concat");
++  return *result;
+ }
+ 
+ namespace {
+@@ -334,6 +465,48 @@ RUNTIME_FUNCTION(Runtime_StringCodePointAt) {
+                       (second_code_point + surrogate_offset));
+ }
+ 
++namespace {
++
++SafeStringTaint StringBuilderConcatTaint(Tagged<String> special,
++                                         Tagged<FixedArray> fixed_array,
++                                         int array_length) {
++  DisallowGarbageCollection no_gc;
++  SafeStringTaint taint;
++  bool special_tainted = special->IsTainted();
++  uint32_t position = 0;
++  for (int i = 0; i < array_length; i++) {
++    Tagged<Object> element = fixed_array->get(i);
++    if (IsSmi(element)) {
++      int encoded_slice = Smi::ToInt(element);
++      int pos;
++      int len;
++      if (encoded_slice > 0) {
++        pos = StringBuilderSubstringPosition::decode(encoded_slice);
++        len = StringBuilderSubstringLength::decode(encoded_slice);
++      } else {
++        pos = Smi::ToInt(fixed_array->get(++i));
++        len = -encoded_slice;
++      }
++      if (special_tainted) {
++        taint.concat(SafeStringTaint(special->GetTaint(),
++                                     static_cast<uint32_t>(pos),
++                                     static_cast<uint32_t>(pos + len)),
++                     position);
++      }
++      position += static_cast<uint32_t>(len);
++    } else {
++      Tagged<String> string = Cast<String>(element);
++      if (string->IsTainted()) {
++        taint.concat(string->GetTaint(), position);
++      }
++      position += string->length();
++    }
++  }
++  return taint;
++}
++
++}  // namespace
++
+ RUNTIME_FUNCTION(Runtime_StringBuilderConcat) {
+   HandleScope scope(isolate);
+   DCHECK_EQ(3, args.length());
+@@ -377,17 +550,27 @@ RUNTIME_FUNCTION(Runtime_StringBuilderConcat) {
+     DirectHandle<SeqOneByteString> answer;
+     ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
+         isolate, answer, isolate->factory()->NewRawOneByteString(length));
+-    DisallowGarbageCollection no_gc;
+-    StringBuilderConcatHelper(*special, answer->GetChars(no_gc), *array,
+-                              static_cast<uint32_t>(array_length));
++    {
++      DisallowGarbageCollection no_gc;
++      StringBuilderConcatHelper(*special, answer->GetChars(no_gc), *array,
++                                static_cast<uint32_t>(array_length));
++    }
++    SafeStringTaint taint =
++        StringBuilderConcatTaint(*special, *array, array_length);
++    if (taint.hasTaint()) answer->SetTaint(isolate, taint);
+     return *answer;
+   } else {
+     DirectHandle<SeqTwoByteString> answer;
+     ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
+         isolate, answer, isolate->factory()->NewRawTwoByteString(length));
+-    DisallowGarbageCollection no_gc;
+-    StringBuilderConcatHelper(*special, answer->GetChars(no_gc), *array,
+-                              static_cast<uint32_t>(array_length));
++    {
++      DisallowGarbageCollection no_gc;
++      StringBuilderConcatHelper(*special, answer->GetChars(no_gc), *array,
++                                static_cast<uint32_t>(array_length));
++    }
++    SafeStringTaint taint =
++        StringBuilderConcatTaint(*special, *array, array_length);
++    if (taint.hasTaint()) answer->SetTaint(isolate, taint);
+     return *answer;
+   }
+ }
+@@ -400,6 +583,7 @@ RUNTIME_FUNCTION(Runtime_StringToArray) {
+   DirectHandle<String> s = args.at<String>(0);
+   uint32_t limit = NumberToUint32(args[1]);
+ 
++  DirectHandle<String> subject = s;
+   s = String::Flatten(isolate, s);
+   const int length =
+       static_cast<int>(std::min(static_cast<uint32_t>(s->length()), limit));
+@@ -407,7 +591,20 @@ RUNTIME_FUNCTION(Runtime_StringToArray) {
+   DirectHandle<FixedArray> elements = isolate->factory()->NewFixedArray(length);
+   bool elements_are_initialized = false;
+ 
+-  if (s->IsFlat() && s->IsOneByteRepresentation()) {
++  if (subject->IsTainted()) {
++    FOR_WITH_HANDLE_SCOPE(isolate, int i = 0, i, i < length, i++) {
++      DirectHandle<String> part =
++          isolate->factory()->NewProperSubString(subject, i, i + 1);
++      if (part->IsTainted()) {
++        std::string index = std::to_string(i);
++        MarkTaintOperation(isolate, *part, "split",
++                           {std::u16string(),
++                            std::u16string(index.begin(), index.end())});
++      }
++      elements->set(i, *part);
++    }
++    elements_are_initialized = true;
++  } else if (s->IsFlat() && s->IsOneByteRepresentation()) {
+     DisallowGarbageCollection no_gc;
+     String::FlatContent content = s->GetFlatContent(no_gc);
+     // Use pre-initialized single characters to initialize all the elements.
+diff --git a/src/runtime/runtime.h b/src/runtime/runtime.h
+index 397d57057bc..14c03e8578f 100644
+--- a/src/runtime/runtime.h
++++ b/src/runtime/runtime.h
+@@ -222,7 +222,8 @@ constexpr bool CanTriggerGC(T... properties) {
+   F(FunctionGetScriptId, 1, 1)             \
+   F(FunctionGetScriptSourcePosition, 1, 1) \
+   F(FunctionGetSourceCode, 1, 1)           \
+-  F(FunctionIsAPIFunction, 1, 1)
++  F(FunctionIsAPIFunction, 1, 1)           \
++  F(MarkTaintedFunctionArguments, -1 /* >= 0 */, 1)
+ 
+ #define FOR_EACH_INTRINSIC_GENERATOR(F, I) \
+   I(AsyncFunctionAwait, 2, 1)              \
+@@ -533,7 +534,11 @@ constexpr bool CanTriggerGC(T... properties) {
+   F(StringReplaceOneCharWithString, 3, 1)            \
+   F(StringSubstring, 3, 1)                           \
+   F(StringToArray, 2, 1)                             \
+-  F(StringToWellFormed, 1, 1)
++  F(StringToWellFormed, 1, 1)                        \
++  F(TaintArrayJoin, 1, 1)                            \
++  F(MarkTaintOperationById, 2, 1)                    \
++  F(PropagateTaintById, 3, 1)                        \
++  F(TaintStringToList, 1, 1)
+ 
+ #define FOR_EACH_INTRINSIC_SYMBOL(F, I)    \
+   F(CreatePrivateNameSymbol, 1, 1)         \
+diff --git a/src/sandbox/isolate-inl.h b/src/sandbox/isolate-inl.h
+index 5b99f11aeef..ffaaab74e06 100644
+--- a/src/sandbox/isolate-inl.h
++++ b/src/sandbox/isolate-inl.h
+@@ -104,6 +104,10 @@ IsolateForPointerCompression::GetExternalPointerTableSpaceFor(
+     return isolate_->heap()->read_only_external_pointer_space();
+   }
+ 
++  if (V8_UNLIKELY(tag_range.Contains(kStringTaintTag))) {
++    return isolate_->heap()->old_external_pointer_space();
++  }
++
+   if (HeapLayout::InYoungGeneration(HeapObject::FromAddress(host))) {
+     return isolate_->heap()->young_external_pointer_space();
+   }
+diff --git a/src/snapshot/serializer.cc b/src/snapshot/serializer.cc
+index 7673cbcb5de..324731d049f 100644
+--- a/src/snapshot/serializer.cc
++++ b/src/snapshot/serializer.cc
+@@ -1196,6 +1196,7 @@ void Serializer::ObjectSerializer::VisitExternalPointer(
+     // Serialization of external references in other objects is handled
+     // elsewhere or not supported.
+     DCHECK(
++        InstanceTypeChecker::IsString(instance_type) ||
+         // Serialization of external pointers stored in EmbedderDataArray
+         // is not supported yet, mostly because it's not used.
+         InstanceTypeChecker::IsEmbedderDataArray(instance_type) ||
+diff --git a/src/strings/taint.cc b/src/strings/taint.cc
+new file mode 100644
+index 00000000000..6e6d85ba272
+--- /dev/null
++++ b/src/strings/taint.cc
+@@ -0,0 +1,378 @@
++#include "src/strings/taint.h"
++
++#include <string>
++#include <vector>
++
++#include "include/v8-context.h"
++#include "include/v8-exception.h"
++#include "include/v8-function.h"
++#include "include/v8-isolate.h"
++#include "include/v8-local-handle.h"
++#include "include/v8-primitive.h"
++#include "include/v8-script.h"
++#include "src/api/api-inl.h"
++#include "src/execution/frames-inl.h"
++#include "src/execution/frames.h"
++#include "src/execution/isolate.h"
++#include "src/handles/handles-inl.h"
++#include "src/heap/heap-inl.h"
++#include "src/heap/heap-layout-inl.h"
++#include "src/objects/js-function-inl.h"
++#include "src/objects/objects-inl.h"
++#include "src/objects/script-inl.h"
++#include "src/objects/script.h"
++#include "src/objects/shared-function-info-inl.h"
++#include "src/objects/string-inl.h"
++#include "src/objects/string.h"
++#include "src/sandbox/external-pointer-inl.h"
++#include "taint/Taint.h"
++#include "taint/md5_utils.h"
++
++namespace v8 {
++namespace internal {
++
++namespace {
++
++const StringTaint& EmptyStringTaintRef() {
++  static const StringTaint empty;
++  return empty;
++}
++
++const StringTaint* ExternalResourceTaint(const String* self) {
++  StringShape shape(self);
++  if (shape.IsExternalOneByte()) {
++    const ExternalOneByteString::Resource* resource =
++        Cast<ExternalOneByteString>(self)->resource();
++    return resource ? resource->GetTaintPtr() : nullptr;
++  }
++  if (shape.IsExternalTwoByte()) {
++    const ExternalTwoByteString::Resource* resource =
++        Cast<ExternalTwoByteString>(self)->resource();
++    return resource ? resource->GetTaintPtr() : nullptr;
++  }
++  return nullptr;
++}
++
++void EmitTaintReportEvent(Isolate* isolate, DirectHandle<String> str,
++                          const char* name) {
++  v8::Isolate* api_isolate = reinterpret_cast<v8::Isolate*>(isolate);
++  if (!api_isolate->InContext()) {
++    return;
++  }
++  v8::HandleScope handle_scope(api_isolate);
++  v8::Local<v8::Context> context = api_isolate->GetCurrentContext();
++  if (context.IsEmpty()) {
++    return;
++  }
++  v8::Context::Scope context_scope(context);
++  MarkTaintOperation(isolate, *str, name);
++  v8::TryCatch try_catch(api_isolate);
++  static const char kReportBody[] =
++      "if (typeof window !== 'undefined' && typeof document !== 'undefined') {"
++      "var e = document.createEvent('CustomEvent');"
++      "var info = { str: str, sink: sink, loc: location.href };"
++      "e.initCustomEvent('__taintreport', true, false, info);"
++      "window.dispatchEvent(e); }";
++  v8::Local<v8::String> body;
++  if (!v8::String::NewFromUtf8(api_isolate, kReportBody).ToLocal(&body)) {
++    return;
++  }
++  v8::Local<v8::String> arg_names[2];
++  if (!v8::String::NewFromUtf8(api_isolate, "str").ToLocal(&arg_names[0]) ||
++      !v8::String::NewFromUtf8(api_isolate, "sink").ToLocal(&arg_names[1])) {
++    return;
++  }
++  v8::ScriptCompiler::Source source(body);
++  v8::Local<v8::Function> report;
++  if (!v8::ScriptCompiler::CompileFunction(context, &source, 2, arg_names)
++           .ToLocal(&report)) {
++    return;
++  }
++  v8::Local<v8::String> v8_sink;
++  if (!v8::String::NewFromUtf8(api_isolate, name).ToLocal(&v8_sink)) {
++    return;
++  }
++  v8::Local<v8::Value> argv[2] = {Utils::ToLocal(str), v8_sink};
++  v8::Local<v8::Value> result;
++  USE(report->Call(context, v8::Undefined(api_isolate), 2, argv)
++          .ToLocal(&result));
++}
++
++}  // namespace
++
++std::u16string TaintStringToU16(Tagged<String> str) {
++  std::u16string out;
++  if (str.is_null()) {
++    return out;
++  }
++  uint32_t len = str->length();
++  out.reserve(len);
++  for (uint32_t i = 0; i < len; i++) {
++    out.push_back(static_cast<char16_t>(str->Get(i)));
++  }
++  return out;
++}
++
++TaintMd5 ScriptSourceMd5(Isolate* isolate, DirectHandle<Script> script) {
++  TaintMd5 digest = {};
++  Tagged<Object> src = script->source();
++  if (!IsString(src)) {
++    return digest;
++  }
++  DirectHandle<String> source(Cast<String>(src), isolate);
++  DirectHandle<String> flat = String::Flatten(isolate, source);
++  uint32_t len = flat->length();
++  std::string bytes;
++  bytes.reserve(len);
++  for (uint32_t i = 0; i < len; i++) {
++    bytes.push_back(static_cast<char>(flat->Get(i) & 0xff));
++  }
++  MD5Context ctx;
++  MD5Init(&ctx);
++  MD5Update(&ctx, reinterpret_cast<const unsigned char*>(bytes.data()),
++            static_cast<unsigned>(bytes.size()));
++  MD5Final(digest.data(), &ctx);
++  return digest;
++}
++
++TaintLocation TaintLocationFromStack(Isolate* isolate) {
++  if (isolate == nullptr) {
++    return TaintLocation();
++  }
++  for (DebuggableStackFrameIterator it(isolate); !it.done(); it.Advance()) {
++    FrameSummary summary = it.GetTopValidFrame();
++    if (!summary.IsJavaScript()) {
++      continue;
++    }
++    DirectHandle<Object> script_obj = summary.script();
++    if (!IsScript(*script_obj)) {
++      continue;
++    }
++    DirectHandle<Script> script = Cast<Script>(script_obj);
++    if (!script->IsUserJavaScript()) {
++      continue;
++    }
++    int position = summary.SourcePosition();
++    Script::PositionInfo info;
++
++    std::u16string filename;
++    Tagged<Object> name = script->name();
++    if (IsString(name)) {
++      filename = TaintStringToU16(Cast<String>(name));
++    }
++
++    std::u16string function;
++    TaintMd5 hash = {};
++    if (script->has_line_ends()) {
++      Script::GetPositionInfo(script, position, &info);
++    } else if (IsString(script->source()) &&
++               Cast<String>(script->source())->IsFlat()) {
++      String::LineEndsVector ends = Script::GetLineEnds(isolate, script);
++      script->GetPositionInfoWithLineEnds(position, &info, ends);
++    }
++    if (IsString(script->source()) &&
++        Cast<String>(script->source())->IsFlat()) {
++      hash = ScriptSourceMd5(isolate, script);
++    }
++    uint32_t line = static_cast<uint32_t>(info.line + 1);
++    uint32_t pos = static_cast<uint32_t>(info.column + 1);
++    uint32_t start_line = static_cast<uint32_t>(script->line_offset());
++    return TaintLocation(filename, line, pos, line, pos, start_line, hash,
++                         function);
++  }
++  return isolate->fallback_taint_location();
++}
++
++TaintOperation TaintOperationFromStack(Isolate* isolate, const char* name) {
++  return TaintOperation(name, TaintLocationFromStack(isolate));
++}
++
++TaintOperation TaintOperationFromStack(Isolate* isolate, const char* name,
++                                       std::vector<std::u16string> args) {
++  return TaintOperation(name, TaintLocationFromStack(isolate), std::move(args));
++}
++
++void MarkTaintSource(Isolate* isolate, Tagged<String> str, const char* name,
++                     std::vector<std::u16string> args) {
++  if (str.is_null() || str->length() == 0) {
++    return;
++  }
++  TaintOperation op(name, TaintLocationFromStack(isolate), std::move(args));
++  op.setSource();
++  StringTaint taint;
++  taint.overlay(0, str->length(), op);
++  str->SetTaint(isolate, taint);
++}
++
++void MarkTaintOperation(Isolate* isolate, Tagged<String> str, const char* name,
++                        std::vector<std::u16string> args) {
++  if (str.is_null() || !str->IsTainted()) {
++    return;
++  }
++  TaintOperation op(name, TaintLocationFromStack(isolate), std::move(args));
++  SafeStringTaint taint = str->GetTaint().safeCopy();
++  taint.extend(op);
++  str->SetTaint(isolate, taint);
++}
++
++void PropagateTaint(Isolate* isolate, Tagged<String> source,
++                    Tagged<String> result, const char* name,
++                    std::vector<std::u16string> args) {
++  if (source.is_null() || result.is_null() || !source->IsTainted()) {
++    return;
++  }
++  SafeStringTaint taint = source->GetTaint().safeCopy();
++  taint.extend(TaintOperation(name, TaintLocationFromStack(isolate),
++                              std::move(args)));
++  result->SetTaint(isolate, taint);
++}
++
++void PropagateTaintRange(Isolate* isolate, Tagged<String> source,
++                         uint32_t begin, uint32_t end, Tagged<String> result,
++                         const char* name) {
++  if (source.is_null() || result.is_null() || !source->IsTainted()) {
++    return;
++  }
++  SafeStringTaint taint = SafeStringTaint(source->GetTaint(), begin, end);
++  taint.extend(TaintOperation(name, TaintLocationFromStack(isolate)));
++  result->SetTaint(isolate, taint);
++}
++
++void PropagateTaintConcat(Isolate* isolate, Tagged<String> left,
++                          Tagged<String> right, Tagged<String> result,
++                          const char* name) {
++  if (left.is_null() || right.is_null() || result.is_null()) {
++    return;
++  }
++  if (!left->IsTainted() && !right->IsTainted()) {
++    return;
++  }
++  SafeStringTaint taint = left->GetTaint().safeCopy();
++  taint.concat(right->GetTaint(), left->length());
++  taint.extend(TaintOperation(name));
++  result->SetTaint(isolate, taint);
++}
++
++bool ReportTaintSink(Isolate* isolate, Tagged<String> str, const char* name) {
++  if (str.is_null() || !str->IsTainted()) {
++    return false;
++  }
++  DirectHandle<String> handle(str, isolate);
++  MarkTaintOperation(isolate, *handle, name);
++  EmitTaintReportEvent(isolate, handle, name);
++  return true;
++}
++
++void MarkTaintedFunctionArguments(
++    Isolate* isolate, DirectHandle<JSFunction> function,
++    base::Vector<const DirectHandle<Object>> args) {
++  bool tainted = false;
++  for (size_t i = 0; i < args.size(); i++) {
++    if (IsString(*args[i]) && Cast<String>(*args[i])->IsTainted()) {
++      tainted = true;
++      break;
++    }
++  }
++  if (!tainted) {
++    return;
++  }
++  auto IntToU16 = [](int value) {
++    std::string digits = std::to_string(value);
++    return std::u16string(digits.begin(), digits.end());
++  };
++  DirectHandle<SharedFunctionInfo> shared(function->shared(), isolate);
++  std::u16string name =
++      TaintStringToU16(*SharedFunctionInfo::DebugName(isolate, shared));
++  std::u16string sourceinfo(u"unknown");
++  if (IsScript(shared->script())) {
++    DirectHandle<Script> script(Cast<Script>(shared->script()), isolate);
++    std::u16string filename;
++    if (IsString(script->name())) {
++      filename = TaintStringToU16(Cast<String>(script->name()));
++    }
++    int line = Script::GetLineNumber(script, shared->StartPosition());
++    if (line < 0) {
++      line = -1;
++    }
++    sourceinfo = filename + u":" + IntToU16(line + 1);
++  }
++  TaintLocation location = TaintLocationFromStack(isolate);
++  for (size_t i = 0; i < args.size(); i++) {
++    if (!IsString(*args[i])) {
++      continue;
++    }
++    Tagged<String> str = Cast<String>(*args[i]);
++    if (!str->IsTainted()) {
++      continue;
++    }
++    SafeStringTaint taint = str->GetTaint().safeCopy();
++    taint.extend(TaintOperation(
++        "function", location,
++        {name, sourceinfo, IntToU16(static_cast<int>(i)),
++         IntToU16(static_cast<int>(args.size()))}));
++    str->SetTaint(isolate, taint);
++  }
++}
++
++void String::InitTaintField(IsolateForSandbox isolate) {
++  taint_.Init(address(), isolate, kNullAddress);
++}
++
++const StringTaint& String::GetTaint() const {
++  Isolate* isolate = Isolate::Current();
++  Address value = taint_.load(isolate);
++  if (value != kNullAddress) {
++    return *reinterpret_cast<const StringTaint*>(value);
++  }
++  const StringTaint* external = ExternalResourceTaint(this);
++  if (external != nullptr) {
++    return *external;
++  }
++  return EmptyStringTaintRef();
++}
++
++bool String::IsTainted() const { return GetTaint().hasTaint(); }
++
++void String::SetTaint(IsolateForSandbox isolate, const StringTaint& taint) {
++  if (length() == 0) {
++    return;
++  }
++  if (!CanCarryTaint()) {
++    return;
++  }
++  if (!taint.hasTaint()) {
++    ClearTaint(isolate);
++    return;
++  }
++  Address value = taint_.load(isolate);
++  StringTaint* slot = reinterpret_cast<StringTaint*>(value);
++  if (slot == nullptr) {
++    slot = new StringTaint(taint);
++    // The taint field may still hold a null external-pointer handle: strings
++    // are created with taint = null handle (via store_encoded/Torque), not an
++    // allocated table entry. In that case store() would call
++    // ExternalPointerTable::Set() with a null handle and DCHECK-fail, so
++    // allocate a fresh table entry via Init() instead. If an entry already
++    // exists (e.g. it was allocated by InitTaintField or left behind by
++    // ClearTaint), update it in place via store().
++    if (taint_.load_encoded() == kNullExternalPointer) {
++      taint_.Init(address(), isolate, reinterpret_cast<Address>(slot));
++    } else {
++      taint_.store(isolate, reinterpret_cast<Address>(slot));
++    }
++    Isolate::Current()->heap()->RegisterTaintedString(Tagged(this));
++  } else {
++    *slot = taint;
++  }
++}
++
++void String::ClearTaint(IsolateForSandbox isolate) {
++  Address value = taint_.load(isolate);
++  if (value != kNullAddress) {
++    delete reinterpret_cast<StringTaint*>(value);
++    taint_.store(isolate, kNullAddress);
++  }
++}
++
++}  // namespace internal
++}  // namespace v8
+diff --git a/src/strings/taint.h b/src/strings/taint.h
+new file mode 100644
+index 00000000000..e15438d7c53
+--- /dev/null
++++ b/src/strings/taint.h
+@@ -0,0 +1,59 @@
++#ifndef V8_STRINGS_TAINT_H_
++#define V8_STRINGS_TAINT_H_
++
++#include <cstdint>
++#include <string>
++#include <vector>
++
++#include "src/base/vector.h"
++#include "src/handles/handles.h"
++#include "src/objects/tagged.h"
++#include "taint/Taint.h"
++
++namespace v8 {
++namespace internal {
++
++class Isolate;
++class JSFunction;
++class Object;
++class String;
++class Script;
++
++TaintLocation TaintLocationFromStack(Isolate* isolate);
++
++TaintOperation TaintOperationFromStack(Isolate* isolate, const char* name);
++TaintOperation TaintOperationFromStack(Isolate* isolate, const char* name,
++                                       std::vector<std::u16string> args);
++
++void MarkTaintSource(Isolate* isolate, Tagged<String> str, const char* name,
++                     std::vector<std::u16string> args = {});
++
++void MarkTaintOperation(Isolate* isolate, Tagged<String> str, const char* name,
++                        std::vector<std::u16string> args = {});
++
++void PropagateTaint(Isolate* isolate, Tagged<String> source,
++                    Tagged<String> result, const char* name,
++                    std::vector<std::u16string> args = {});
++
++void PropagateTaintRange(Isolate* isolate, Tagged<String> source,
++                         uint32_t begin, uint32_t end, Tagged<String> result,
++                         const char* name);
++
++void PropagateTaintConcat(Isolate* isolate, Tagged<String> left,
++                          Tagged<String> right, Tagged<String> result,
++                          const char* name);
++
++bool ReportTaintSink(Isolate* isolate, Tagged<String> str, const char* name);
++
++void MarkTaintedFunctionArguments(
++    Isolate* isolate, DirectHandle<JSFunction> function,
++    base::Vector<const DirectHandle<Object>> args);
++
++TaintMd5 ScriptSourceMd5(Isolate* isolate, DirectHandle<Script> script);
++
++std::u16string TaintStringToU16(Tagged<String> str);
++
++}  // namespace internal
++}  // namespace v8
++
++#endif  // V8_STRINGS_TAINT_H_
+diff --git a/src/strings/uri.cc b/src/strings/uri.cc
+index ac595714966..603b7198f0b 100644
+--- a/src/strings/uri.cc
++++ b/src/strings/uri.cc
+@@ -14,6 +14,7 @@
+ #include "src/execution/isolate-inl.h"
+ #include "src/strings/char-predicates-inl.h"
+ #include "src/strings/string-search.h"
++#include "src/strings/taint.h"
+ #include "src/strings/unicode-inl.h"
+ 
+ namespace v8 {
+@@ -78,9 +79,27 @@ int TwoDigitHex(base::uc16 character1, base::uc16 character2) {
+   return (high << 4) + low;
+ }
+ 
++void AppendTaintAt(const StringTaint& taint, uint32_t index, uint32_t begin,
++                   uint32_t end, SafeStringTaint* result_taint) {
++  if (!taint.hasTaint()) return;
++  const TaintFlow* flow = taint.at(index);
++  if (flow == nullptr) return;
++  result_taint->append(TaintRange(begin, end, *flow));
++}
++
++void SetUriTaint(Isolate* isolate, Tagged<String> result, const char* name,
++                 SafeStringTaint* taint) {
++  if (!taint->hasTaint()) return;
++  taint->extend(TaintOperationFromStack(isolate, name));
++  result->SetTaint(isolate, *taint);
++}
++
+ template <typename T>
+ void AddToBuffer(base::uc16 decoded, String::FlatContent* uri_content,
+-                 int index, bool is_uri, std::vector<T>* buffer) {
++                 int index, bool is_uri, std::vector<T>* buffer,
++                 const StringTaint& taint, uint32_t offset,
++                 SafeStringTaint* result_taint) {
++  uint32_t position = offset + static_cast<uint32_t>(buffer->size());
+   if (is_uri && IsReservedPredicate(decoded)) {
+     buffer->push_back('%');
+     base::uc16 first = uri_content->Get(index + 1);
+@@ -90,15 +109,21 @@ void AddToBuffer(base::uc16 decoded, String::FlatContent* uri_content,
+ 
+     buffer->push_back(first);
+     buffer->push_back(second);
++    AppendTaintAt(taint, index, position, position + 1, result_taint);
++    AppendTaintAt(taint, index + 1, position + 1, position + 2, result_taint);
++    AppendTaintAt(taint, index + 2, position + 2, position + 3, result_taint);
+   } else {
+     buffer->push_back(decoded);
++    AppendTaintAt(taint, index + 2, position, position + 1, result_taint);
+   }
+ }
+ 
+ bool IntoTwoByte(int index, bool is_uri, int uri_length,
+                  String::FlatContent* uri_content,
+-                 std::vector<base::uc16>* buffer) {
++                 std::vector<base::uc16>* buffer, const StringTaint& taint,
++                 uint32_t offset, SafeStringTaint* result_taint) {
+   for (int k = index; k < uri_length; k++) {
++    uint32_t position = offset + static_cast<uint32_t>(buffer->size());
+     base::uc16 code = uri_content->Get(k);
+     if (code == '%') {
+       int two_digits;
+@@ -131,11 +156,16 @@ bool IntoTwoByte(int index, bool is_uri, int uri_length,
+         if (!DecodeOctets(octets, number_of_continuation_bytes, buffer)) {
+           return false;
+         }
++        AppendTaintAt(taint, k, position,
++                      offset + static_cast<uint32_t>(buffer->size()),
++                      result_taint);
+       } else {
+-        AddToBuffer(decoded, uri_content, k - 2, is_uri, buffer);
++        AddToBuffer(decoded, uri_content, k - 2, is_uri, buffer, taint, offset,
++                    result_taint);
+       }
+     } else {
+       buffer->push_back(code);
++      AppendTaintAt(taint, k, position, position + 1, result_taint);
+     }
+   }
+   return true;
+@@ -143,9 +173,11 @@ bool IntoTwoByte(int index, bool is_uri, int uri_length,
+ 
+ bool IntoOneAndTwoByte(DirectHandle<String> uri, bool is_uri,
+                        std::vector<uint8_t>* one_byte_buffer,
+-                       std::vector<base::uc16>* two_byte_buffer) {
++                       std::vector<base::uc16>* two_byte_buffer,
++                       SafeStringTaint* result_taint) {
+   DisallowGarbageCollection no_gc;
+   String::FlatContent uri_content = uri->GetFlatContent(no_gc);
++  const StringTaint& taint = uri->GetTaint();
+ 
+   int uri_length = uri->length();
+   for (int k = 0; k < uri_length; k++) {
+@@ -161,17 +193,24 @@ bool IntoOneAndTwoByte(DirectHandle<String> uri, bool is_uri,
+       base::uc16 decoded = static_cast<base::uc16>(two_digits);
+       if (decoded > unibrow::Utf8::kMaxOneByteChar) {
+         return IntoTwoByte(k, is_uri, uri_length, &uri_content,
+-                           two_byte_buffer);
++                           two_byte_buffer, taint,
++                           static_cast<uint32_t>(one_byte_buffer->size()),
++                           result_taint);
+       }
+ 
+-      AddToBuffer(decoded, &uri_content, k, is_uri, one_byte_buffer);
++      AddToBuffer(decoded, &uri_content, k, is_uri, one_byte_buffer, taint, 0,
++                  result_taint);
+       k += 2;
+     } else {
+       if (code > unibrow::Utf8::kMaxOneByteChar) {
+         return IntoTwoByte(k, is_uri, uri_length, &uri_content,
+-                           two_byte_buffer);
++                           two_byte_buffer, taint,
++                           static_cast<uint32_t>(one_byte_buffer->size()),
++                           result_taint);
+       }
++      uint32_t position = static_cast<uint32_t>(one_byte_buffer->size());
+       one_byte_buffer->push_back(code);
++      AppendTaintAt(taint, k, position, position + 1, result_taint);
+     }
+   }
+   return true;
+@@ -184,15 +223,23 @@ MaybeDirectHandle<String> Uri::Decode(Isolate* isolate,
+   uri = String::Flatten(isolate, uri);
+   std::vector<uint8_t> one_byte_buffer;
+   std::vector<base::uc16> two_byte_buffer;
++  SafeStringTaint result_taint;
+ 
+-  if (!IntoOneAndTwoByte(uri, is_uri, &one_byte_buffer, &two_byte_buffer)) {
++  if (!IntoOneAndTwoByte(uri, is_uri, &one_byte_buffer, &two_byte_buffer,
++                         &result_taint)) {
+     THROW_NEW_ERROR(isolate, NewError(isolate->uri_error_function(),
+                                       MessageTemplate::kURIMalformed));
+   }
+ 
+   if (two_byte_buffer.empty()) {
+-    return isolate->factory()->NewStringFromOneByte(base::Vector<const uint8_t>(
+-        one_byte_buffer.data(), static_cast<int>(one_byte_buffer.size())));
++    DirectHandle<String> decoded;
++    ASSIGN_RETURN_ON_EXCEPTION(
++        isolate, decoded,
++        isolate->factory()->NewStringFromOneByte(base::Vector<const uint8_t>(
++            one_byte_buffer.data(), static_cast<int>(one_byte_buffer.size()))));
++    SetUriTaint(isolate, *decoded, is_uri ? "decodeURI" : "decodeURIComponent",
++                &result_taint);
++    return decoded;
+   }
+ 
+   DirectHandle<SeqTwoByteString> result;
+@@ -211,6 +258,8 @@ MaybeDirectHandle<String> Uri::Decode(Isolate* isolate,
+     CopyChars(chars, two_byte_buffer.data(), two_byte_buffer.size());
+   }
+ 
++  SetUriTaint(isolate, *result, is_uri ? "decodeURI" : "decodeURIComponent",
++              &result_taint);
+   return result;
+ }
+ 
+@@ -328,8 +377,11 @@ enum class EncodeStatus { kSuccess, kUriError, kAllocationFailure };
+ 
+ V8_NODISCARD EncodeStatus
+ EncodeHelperOneByte(base::Vector<const uint8_t> uri_content, bool is_uri,
+-                    ResizableBuffer<uint8_t>* buffer) {
+-  for (uint8_t c : uri_content) {
++                    const StringTaint& taint, ResizableBuffer<uint8_t>* buffer,
++                    SafeStringTaint* result_taint) {
++  for (int k = 0; k < uri_content.length(); k++) {
++    uint8_t c = uri_content[k];
++    uint32_t position = static_cast<uint32_t>(buffer->size());
+     if (IsUnescapePredicateInUriComponent(c) || (is_uri && IsUriSeparator(c))) {
+       if (!buffer->TryPushBack(c)) {
+         return EncodeStatus::kAllocationFailure;
+@@ -339,15 +391,19 @@ EncodeHelperOneByte(base::Vector<const uint8_t> uri_content, bool is_uri,
+         return EncodeStatus::kAllocationFailure;
+       }
+     }
++    AppendTaintAt(taint, k, position, static_cast<uint32_t>(buffer->size()),
++                  result_taint);
+   }
+   return EncodeStatus::kSuccess;
+ }
+ 
+ V8_NODISCARD EncodeStatus
+ EncodeHelperTwoByte(base::Vector<const base::uc16> uri_content, bool is_uri,
+-                    ResizableBuffer<uint8_t>* buffer) {
++                    const StringTaint& taint, ResizableBuffer<uint8_t>* buffer,
++                    SafeStringTaint* result_taint) {
+   for (int k = 0; k < uri_content.length(); k++) {
+     base::uc16 cc1 = uri_content[k];
++    uint32_t position = static_cast<uint32_t>(buffer->size());
+     if (unibrow::Utf16::IsLeadSurrogate(cc1)) {
+       k++;
+       if (k >= uri_content.length()) {
+@@ -363,6 +419,8 @@ EncodeHelperTwoByte(base::Vector<const base::uc16> uri_content, bool is_uri,
+       if (!Encode(unibrow::Utf16::CombineSurrogatePair(cc1, cc2), buffer)) {
+         return EncodeStatus::kAllocationFailure;
+       }
++      AppendTaintAt(taint, k, position, static_cast<uint32_t>(buffer->size()),
++                    result_taint);
+       continue;
+     }
+ 
+@@ -381,18 +439,24 @@ EncodeHelperTwoByte(base::Vector<const base::uc16> uri_content, bool is_uri,
+         return EncodeStatus::kAllocationFailure;
+       }
+     }
++    AppendTaintAt(taint, k, position, static_cast<uint32_t>(buffer->size()),
++                  result_taint);
+   }
+   return EncodeStatus::kSuccess;
+ }
+ 
+ V8_NODISCARD EncodeStatus EncodeHelper(DirectHandle<String> uri, bool is_uri,
+-                                       ResizableBuffer<uint8_t>* buffer) {
++                                       ResizableBuffer<uint8_t>* buffer,
++                                       SafeStringTaint* result_taint) {
+   DisallowGarbageCollection no_gc;
+   String::FlatContent uri_content = uri->GetFlatContent(no_gc);
++  const StringTaint& taint = uri->GetTaint();
+   if (uri_content.IsOneByte()) {
+-    return EncodeHelperOneByte(uri_content.ToOneByteVector(), is_uri, buffer);
++    return EncodeHelperOneByte(uri_content.ToOneByteVector(), is_uri, taint,
++                               buffer, result_taint);
+   }
+-  return EncodeHelperTwoByte(uri_content.ToUC16Vector(), is_uri, buffer);
++  return EncodeHelperTwoByte(uri_content.ToUC16Vector(), is_uri, taint, buffer,
++                             result_taint);
+ }
+ 
+ }  // anonymous namespace
+@@ -402,11 +466,19 @@ MaybeDirectHandle<String> Uri::Encode(Isolate* isolate,
+   uri = String::Flatten(isolate, uri);
+   ResizableBuffer<uint8_t> buffer(uri->length(), v8::String::kMaxLength);
+ 
+-  EncodeStatus status = EncodeHelper(uri, is_uri, &buffer);
++  SafeStringTaint result_taint;
++  EncodeStatus status = EncodeHelper(uri, is_uri, &buffer, &result_taint);
+ 
+   switch (status) {
+-    case EncodeStatus::kSuccess:
+-      return isolate->factory()->NewStringFromOneByte(base::VectorOf(buffer));
++    case EncodeStatus::kSuccess: {
++      DirectHandle<String> encoded;
++      ASSIGN_RETURN_ON_EXCEPTION(
++          isolate, encoded,
++          isolate->factory()->NewStringFromOneByte(base::VectorOf(buffer)));
++      SetUriTaint(isolate, *encoded,
++                  is_uri ? "encodeURI" : "encodeURIComponent", &result_taint);
++      return encoded;
++    }
+     case EncodeStatus::kUriError:
+       THROW_NEW_ERROR(isolate, NewError(isolate->uri_error_function(),
+                                         MessageTemplate::kURIMalformed));
+@@ -601,17 +673,27 @@ static MaybeHandle<String> EscapePrivate(Isolate* isolate,
+ 
+ MaybeDirectHandle<String> Uri::Escape(Isolate* isolate, Handle<String> string) {
+   string = String::Flatten(isolate, string);
+-  return String::IsOneByteRepresentationUnderneath(*string)
+-             ? EscapePrivate<uint8_t>(isolate, string)
+-             : EscapePrivate<base::uc16>(isolate, string);
++  DirectHandle<String> result;
++  ASSIGN_RETURN_ON_EXCEPTION(
++      isolate, result,
++      String::IsOneByteRepresentationUnderneath(*string)
++          ? EscapePrivate<uint8_t>(isolate, string)
++          : EscapePrivate<base::uc16>(isolate, string));
++  PropagateTaint(isolate, *string, *result, "escape");
++  return result;
+ }
+ 
+ MaybeDirectHandle<String> Uri::Unescape(Isolate* isolate,
+                                         Handle<String> string) {
+   string = String::Flatten(isolate, string);
+-  return String::IsOneByteRepresentationUnderneath(*string)
+-             ? UnescapePrivate<uint8_t>(isolate, string)
+-             : UnescapePrivate<base::uc16>(isolate, string);
++  DirectHandle<String> result;
++  ASSIGN_RETURN_ON_EXCEPTION(
++      isolate, result,
++      String::IsOneByteRepresentationUnderneath(*string)
++          ? UnescapePrivate<uint8_t>(isolate, string)
++          : UnescapePrivate<base::uc16>(isolate, string));
++  PropagateTaint(isolate, *string, *result, "unescape");
++  return result;
+ }
+ 
+ }  // namespace internal

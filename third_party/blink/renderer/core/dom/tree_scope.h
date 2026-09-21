@@ -38,6 +38,10 @@
 
 namespace blink {
 
+namespace bindings {
+class NativeValueTraitsStringAdapter;
+}
+
 class Animation;
 class CSSStyleSheet;
 class ContainerNode;
@@ -103,6 +107,8 @@ class CORE_EXPORT TreeScope : public GarbageCollectedMixin {
   // name.
   Element* AdjustedElement(const Element&) const;
   Element* getElementById(const AtomicString&) const;
+  Element* getElementById(
+      const bindings::NativeValueTraitsStringAdapter&) const;
   const HeapVector<Member<Element>>& GetAllElementsById(
       const AtomicString&) const;
   bool HasElementWithId(const AtomicString& id) const;

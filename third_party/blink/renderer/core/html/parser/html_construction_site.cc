@@ -393,7 +393,8 @@ void HTMLConstructionSite::FlushPendingText() {
     HTMLConstructionSiteTask task(HTMLConstructionSiteTask::kInsertText);
     task.parent = pending_text_.parent;
     task.next_child = pending_text_.next_child;
-    String text = TryCanonicalizeString(string, pending_text_.whitespace_mode);
+    String text = TryCanonicalizeString(pending_text_.string_builder.ToString(),
+                                        pending_text_.whitespace_mode);
     if (task.parent->GetDocument().IsXHRDocument() && text.Impl() &&
         text.length()) {
       MarkTaintSource(text, "XMLHttpRequest.response");
@@ -414,6 +415,7 @@ void HTMLConstructionSite::FlushPendingText() {
   // to determine limit.
   std::optional<unsigned> length_limit;
 
+  const String builder_string = pending_text_.string_builder.ToString();
   unsigned current_position = 0;
   while (current_position < string.length()) {
     unsigned proposed_break_index = NextTextBreakPositionForContainer(
@@ -430,7 +432,7 @@ void HTMLConstructionSite::FlushPendingText() {
     StringView substring_view;
     if (!current_position && substring_view_length >= string.length())
         [[likely]] {
-      substring_view = string;
+      substring_view = builder_string;
     } else {
       substring_view = string.SubstringView(current_position,
                                             break_index - current_position);

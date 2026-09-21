@@ -1338,6 +1338,19 @@ String Request::ContentType() const {
   return result;
 }
 
+String Request::GetInitialURL() const {
+  const KURL& url = request_->Url();
+  if (!url.IsValid()) {
+    return g_empty_string;
+  }
+  if (!url.HasFragmentIdentifier()) {
+    return url.GetString();
+  }
+  KURL url_without_fragment(url);
+  url_without_fragment.RemoveFragmentIdentifier();
+  return url_without_fragment.GetString();
+}
+
 void Request::Trace(Visitor* visitor) const {
   ScriptWrappable::Trace(visitor);
   Body::Trace(visitor);

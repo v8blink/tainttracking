@@ -135,8 +135,8 @@ class CORE_EXPORT XMLHttpRequest final
             ExceptionState& exception_state);
   void abort();
   void Dispose();
-  void setRequestHeader(const AtomicString& name,
-                        const AtomicString& value,
+  void setRequestHeader(const String& name,
+                        const String& value,
                         ExceptionState&);
   void setPrivateToken(const PrivateToken*, ExceptionState&);
   void setAttributionReporting(const ScriptValue&);

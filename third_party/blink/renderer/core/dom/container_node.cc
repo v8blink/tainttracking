@@ -23,6 +23,7 @@
 
 #include "third_party/blink/renderer/core/dom/container_node.h"
 
+#include "third_party/blink/renderer/bindings/core/v8/native_value_traits_impl.h"
 #include "third_party/blink/renderer/bindings/core/v8/v8_get_html_options.h"
 #include "third_party/blink/renderer/bindings/core/v8/v8_union_sethtmlunsafeoptions_trustedparseroptions.h"
 #include "third_party/blink/renderer/core/accessibility/ax_object_cache.h"
@@ -1545,6 +1546,43 @@ StaticElementList* ContainerNode::querySelectorAll(
   return QuerySelectorAll(selectors, exception_state);
 }
 
+Element* ContainerNode::querySelector(
+    const bindings::NativeValueTraitsStringAdapter& selectors,
+    ExceptionState& exception_state) {
+  String selector_string = selectors;
+  AtomicString atomic_selectors;
+  if (!selector_string.IsNull()) {
+    atomic_selectors = selector_string.Is8Bit()
+                           ? AtomicString(selector_string.Span8())
+                           : AtomicString(selector_string.Span16());
+  }
+  Element* result = QuerySelector(atomic_selectors, exception_state);
+  if (result) {
+    result->TaintSelectorOperation("document.querySelector", selector_string);
+  }
+  return result;
+}
+
+StaticElementList* ContainerNode::querySelectorAll(
+    const bindings::NativeValueTraitsStringAdapter& selectors,
+    ExceptionState& exception_state) {
+  String selector_string = selectors;
+  AtomicString atomic_selectors;
+  if (!selector_string.IsNull()) {
+    atomic_selectors = selector_string.Is8Bit()
+                           ? AtomicString(selector_string.Span8())
+                           : AtomicString(selector_string.Span16());
+  }
+  StaticElementList* result = QuerySelectorAll(atomic_selectors, exception_state);
+  if (result) {
+    for (unsigned i = 0; i < result->length(); ++i) {
+      result->item(i)->TaintSelectorOperation("document.querySelectorAll",
+                                              selector_string);
+    }
+  }
+  return result;
+}
+
 unsigned ContainerNode::CountChildren() const {
   unsigned count = 0;
   for (Node* node = firstChild(); node; node = node->nextSibling())
@@ -1558,11 +1596,7 @@ Element* ContainerNode::QuerySelector(const AtomicString& selectors,
       selectors, GetDocument(), exception_state);
   if (!selector_query)
     return nullptr;
-  Element* result = selector_query->QueryFirst(*this);
-  if (result) {
-    result->TaintSelectorOperation("document.querySelector");
-  }
-  return result;
+  return selector_query->QueryFirst(*this);
 }
 
 Element* ContainerNode::QuerySelector(const AtomicString& selectors) {
@@ -1576,13 +1610,7 @@ StaticElementList* ContainerNode::QuerySelectorAll(
       selectors, GetDocument(), exception_state);
   if (!selector_query)
     return nullptr;
-  StaticElementList* result = selector_query->QueryAll(*this);
-  if (result) {
-    for (unsigned i = 0; i < result->length(); ++i) {
-      result->item(i)->TaintSelectorOperation("document.querySelectorAll");
-    }
-  }
-  return result;
+  return selector_query->QueryAll(*this);
 }
 
 StaticElementList* ContainerNode::QuerySelectorAll(
@@ -1873,6 +1901,21 @@ Element* ContainerNode::getElementById(const AtomicString& id) const {
       return &element;
   }
   return nullptr;
+}
+
+Element* ContainerNode::getElementById(
+    const bindings::NativeValueTraitsStringAdapter& id) const {
+  String id_string = id;
+  if (id_string.empty())
+    return nullptr;
+  AtomicString atomic_id = id_string.Is8Bit()
+                               ? AtomicString(id_string.Span8())
+                               : AtomicString(id_string.Span16());
+  Element* element = getElementById(atomic_id);
+  if (element) {
+    element->TaintSelectorOperation("document.getElementById", id_string);
+  }
+  return element;
 }
 
 NodeListsNodeData& ContainerNode::EnsureNodeLists() {

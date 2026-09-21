@@ -27,6 +27,7 @@
 #include "third_party/blink/renderer/core/dom/tree_scope.h"
 #include "third_party/blink/renderer/core/tainting/taint_util.h"
 
+#include "third_party/blink/renderer/bindings/core/v8/native_value_traits_impl.h"
 #include "third_party/blink/renderer/bindings/core/v8/v8_observable_array_css_style_sheet.h"
 #include "third_party/blink/renderer/bindings/core/v8/v8_throw_dom_exception.h"
 #include "third_party/blink/renderer/core/animation/document_animations.h"
@@ -122,11 +123,23 @@ void TreeScope::ClearScopedStyleResolver() {
 Element* TreeScope::getElementById(const AtomicString& element_id) const {
   if (element_id.empty())
     return nullptr;
-  String taint_target = element_id;
-  MarkTaintSource(taint_target, "document.getElementById");
   if (!elements_by_id_)
     return nullptr;
   return elements_by_id_->GetElementById(element_id, *this);
+}
+
+Element* TreeScope::getElementById(
+    const bindings::NativeValueTraitsStringAdapter& element_id) const {
+  String id_string = element_id;
+  if (id_string.empty())
+    return nullptr;
+  AtomicString id = id_string.Is8Bit() ? AtomicString(id_string.Span8())
+                                       : AtomicString(id_string.Span16());
+  Element* element = getElementById(id);
+  if (element) {
+    element->TaintSelectorOperation("document.getElementById", id_string);
+  }
+  return element;
 }
 
 const HeapVector<Member<Element>>& TreeScope::GetAllElementsById(

@@ -119,6 +119,7 @@ class CORE_EXPORT Response final : public ScriptWrappable, public Body {
 
   String ContentType() const override;
   String MimeType() const override;
+  String GetInitialURL() const override;
   String InternalMIMEType() const;
 
   const Vector<KURL>& InternalURLList() const;

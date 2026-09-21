@@ -121,6 +121,7 @@ class CORE_EXPORT Request final : public ScriptWrappable, public Body {
 
   String ContentType() const override;
   String MimeType() const override;
+  String GetInitialURL() const override;
 
   const Member<FetchRequestData> request_;
   const Member<Headers> headers_;

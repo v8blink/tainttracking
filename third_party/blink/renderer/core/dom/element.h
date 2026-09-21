@@ -44,6 +44,7 @@
 #include "third_party/blink/renderer/core/css/style_recalc_change.h"
 #include "third_party/blink/renderer/core/css/style_request.h"
 #include "taint/Taint.h"
+#include "third_party/blink/renderer/core/tainting/taint_util.h"
 #include "third_party/blink/renderer/core/dom/container_node.h"
 #include "third_party/blink/renderer/core/dom/dom_high_res_time_stamp.h"
 #include "third_party/blink/renderer/core/dom/element_data.h"
@@ -87,6 +88,10 @@ enum class TrackedElementFeature;
 }  // namespace viz
 
 namespace blink {
+
+namespace bindings {
+class NativeValueTraitsStringAdapter;
+}
 
 class AnchorPositionScrollData;
 class Animation;
@@ -456,7 +461,8 @@ class CORE_EXPORT Element : public ContainerNode {
   // style attribute or one of the SVG animatable attributes.
   bool FastHasAttribute(const QualifiedName&) const;
   bool FastHasAttribute(const QualifiedNameWithHash&) const;
-  const AtomicString& FastGetAttribute(const QualifiedName&) const;
+  const AtomicString& FastGetAttribute(const QualifiedName&,
+                                       bool do_tainting = true) const;
 #if DCHECK_IS_ON()
   bool FastAttributeLookupAllowed(const QualifiedName&) const;
 #endif
@@ -476,6 +482,8 @@ class CORE_EXPORT Element : public ContainerNode {
   const AtomicString& getAttribute(const AtomicString& local_name) const {
     return GetAttributeHinted(local_name, WeakLowercaseIfNecessary(local_name));
   }
+  String getAttribute(
+      const bindings::NativeValueTraitsStringAdapter& local_name) const;
 
   const AtomicString& getAttributeNS(const AtomicString& namespace_uri,
                                      const AtomicString& local_name) const;
@@ -488,6 +496,9 @@ class CORE_EXPORT Element : public ContainerNode {
     SetAttributeHinted(std::move(name), weak_lowercase_name, std::move(value),
                        exception_state);
   }
+  void setAttribute(const bindings::NativeValueTraitsStringAdapter& name,
+                    const bindings::NativeValueTraitsStringAdapter& value,
+                    ExceptionState& exception_state);
 
   // Trusted Types variant for explicit setAttribute() use.
   void setAttribute(AtomicString name,
@@ -522,9 +533,11 @@ class CORE_EXPORT Element : public ContainerNode {
   bool toggleAttribute(const AtomicString&, bool force, ExceptionState&);
 
   const AtomicString& GetIdAttribute() const;
+  const AtomicString& GetIdNoTainting() const;
   void SetIdAttribute(const AtomicString&);
 
   const AtomicString& GetNameAttribute() const;
+  const AtomicString& GetNameNoTainting() const;
   const AtomicString& GetClassAttribute() const;
 
   // This is an operation defined in the DOM standard like:
@@ -1457,7 +1470,7 @@ class CORE_EXPORT Element : public ContainerNode {
   void SetOuterHTMLInternal(const String&,
                             const FragmentParserOptions&,
                             ExceptionState&);
-  String innerHTML() const;
+  virtual String innerHTML() const;
   String outerHTML() const;
   void setInnerHTML(const V8UnionStringLegacyNullToEmptyStringOrTrustedHTML*,
                     ExceptionState&);
@@ -1605,6 +1618,8 @@ class CORE_EXPORT Element : public ContainerNode {
   // https://dom.spec.whatwg.org/#dom-element-closest
   Element* closest(const AtomicString& selectors, ExceptionState&);
   Element* closest(const AtomicString& selectors);
+  Element* closest(const bindings::NativeValueTraitsStringAdapter& selectors,
+                   ExceptionState&);
 
   virtual bool ShouldAppearIndeterminate() const { return false; }
 
@@ -2104,7 +2119,7 @@ class CORE_EXPORT Element : public ContainerNode {
   void ClearSkeletonPseudo();
   PseudoElement& EnsureSkeletonPseudo();
 
-  void TaintSelectorOperation(const char* operation);
+  void TaintSelectorOperation(const char* operation, const String& selector);
   const TaintList& GetSelectorTaintFlowList() const { return mTaintList; }
 
  protected:
@@ -2547,8 +2562,17 @@ class CORE_EXPORT Element : public ContainerNode {
                             const QualifiedName&,
                             const AtomicString& value,
                             AttributeModificationReason);
+  void SetAttributeInternal(wtf_size_t index,
+                            const QualifiedName&,
+                            const AtomicString& value,
+                            const String& tainted_value,
+                            AttributeModificationReason);
   void AppendAttributeInternal(const QualifiedName&,
                                const AtomicString& value,
+                               AttributeModificationReason);
+  void AppendAttributeInternal(const QualifiedName&,
+                               const AtomicString& value,
+                               const StringTaint& taint,
                                AttributeModificationReason);
   void RemoveAttributeInternal(wtf_size_t index, AttributeModificationReason);
   AtomicString TrustedTypesCheckForAttribute(const QualifiedName&,
@@ -2578,6 +2602,10 @@ class CORE_EXPORT Element : public ContainerNode {
                           AtomicStringTable::WeakResult hint,
                           AtomicString value,
                           ExceptionState& = ASSERT_NO_EXCEPTION);
+  void SetAttributeHinted(AtomicString name,
+                          AtomicStringTable::WeakResult hint,
+                          const String& value,
+                          ExceptionState& exception_state);
   void SetAttributeHinted(AtomicString name,
                           AtomicStringTable::WeakResult hint,
                           const V8TrustedType* trusted_string,
@@ -2782,7 +2810,8 @@ inline bool Element::FastHasAttribute(const QualifiedNameWithHash& name) const {
 }
 
 inline const AtomicString& Element::FastGetAttribute(
-    const QualifiedName& name) const {
+    const QualifiedName& name,
+    bool do_tainting) const {
 #if DCHECK_IS_ON()
   DCHECK(FastAttributeLookupAllowed(name))
       << TagQName().ToString().Utf8() << "/@" << name.ToString().Utf8();
@@ -2790,7 +2819,16 @@ inline const AtomicString& Element::FastGetAttribute(
   if (CouldHaveAttribute(name) && HasElementData()) {
     if (const Attribute* attribute =
             GetElementData()->Attributes().Find(name)) {
-      return attribute->Value();
+      const AtomicString& result = attribute->Value();
+      if (do_tainting) {
+        String taint_target = result;
+        if (attribute->Taint().hasTaint()) {
+          taint_target.SetTaint(attribute->Taint());
+        }
+        MarkTaintSourceAttribute(taint_target, "element.attribute", this,
+                                 name.LocalName());
+      }
+      return result;
     }
   }
   return g_null_atom;
@@ -2832,8 +2870,17 @@ inline const AtomicString& Element::GetIdAttribute() const {
   return HasID() ? FastGetAttribute(html_names::kIdAttr) : g_null_atom;
 }
 
+inline const AtomicString& Element::GetIdNoTainting() const {
+  return HasID() ? FastGetAttribute(html_names::kIdAttr, false) : g_null_atom;
+}
+
 inline const AtomicString& Element::GetNameAttribute() const {
   return HasName() ? FastGetAttribute(html_names::kNameAttr) : g_null_atom;
+}
+
+inline const AtomicString& Element::GetNameNoTainting() const {
+  return HasName() ? FastGetAttribute(html_names::kNameAttr, false)
+                   : g_null_atom;
 }
 
 inline const AtomicString& Element::GetClassAttribute() const {

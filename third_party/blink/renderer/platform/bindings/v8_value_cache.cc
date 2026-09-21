@@ -164,6 +164,10 @@ v8::Local<v8::String> StringCache::V8ExternalString(v8::Isolate* isolate,
   if (!string_impl->length())
     return v8::String::Empty(isolate);
 
+  if (string_impl->isTainted()) {
+    return MakeExternalString(isolate, String(string_impl));
+  }
+
   StringCacheMapTraits::MapType::PersistentValueReference cached_v8_string =
       string_cache_.GetReference(string_impl);
   if (!cached_v8_string.IsEmpty()) {
@@ -197,6 +201,12 @@ void StringCache::SetReturnValueFromString(
       RuntimeCallStats::CounterId::kSetReturnValueFromStringSlow);
   if (!string_impl->length()) {
     return_value.SetEmptyString();
+    return;
+  }
+
+  if (string_impl->isTainted()) {
+    return_value.Set(
+        MakeExternalString(return_value.GetIsolate(), String(string_impl)));
     return;
   }
 

@@ -328,6 +328,7 @@ void DOMWebSocket::ReleaseChannel() {
 
 void DOMWebSocket::send(const String& message,
                         ExceptionState& exception_state) {
+  ReportTaintSink(message, "WebSocket.send", url().GetString());
   DVLOG(1) << "WebSocket " << this << " send() Sending String " << message;
   if (common_.GetState() == kConnecting) {
     SetInvalidStateErrorForSendMethod(exception_state);
@@ -537,7 +538,8 @@ void DOMWebSocket::DidReceiveTextMessage(const String& msg) {
 
   DCHECK(origin_);
   String taint_target = msg;
-  MarkTaintSource(taint_target, "WebSocket.MessageEvent.data");
+  MarkTaintSource(taint_target, "WebSocket.MessageEvent.data",
+                  url().GetString());
   event_queue_->Dispatch(MessageEvent::Create(msg, origin_));
   NotifyWebSocketActivity();
 }

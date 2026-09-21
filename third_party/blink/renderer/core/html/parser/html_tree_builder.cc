@@ -263,9 +263,7 @@ class HTMLTreeBuilder::CharacterTokenBuffer {
   }
 
   void GiveRemainingTo(StringBuilder& recipient) {
-    VisitCharacters(characters_, [&](auto chars) {
-      recipient.Append(chars.subspan(current_, end_ - current_));
-    });
+    recipient.Append(StringView(characters_, current_, end_ - current_));
     current_ = end_;
   }
 

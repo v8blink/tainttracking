@@ -243,6 +243,12 @@ String HTMLScriptElement::scriptInnerTextForBinding() {
   return innerTextForBinding();
 }
 
+String HTMLScriptElement::innerHTML() const {
+  String result = Element::innerHTML();
+  MarkTaintSourceElement(result, "script.innerHTML", this);
+  return result;
+}
+
 V8UnionStringOrTrustedScript::Ret HTMLScriptElement::text(
     ScriptState* script_state) {
   return V8UnionStringOrTrustedScript::Ret(script_state, TextFromChildren());
@@ -276,6 +282,7 @@ void HTMLScriptElement::setSrc(const V8UnionTrustedScriptURLOrUSVString* value,
   if (exception_state.HadException()) {
     return;
   }
+  ReportTaintSink(compliant_value, "script.src", this);
   SetAttributeWithoutValidation(html_names::kSrcAttr,
                                 AtomicString(compliant_value));
 }

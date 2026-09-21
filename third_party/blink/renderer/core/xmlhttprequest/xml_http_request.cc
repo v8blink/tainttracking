@@ -227,6 +227,17 @@ bool ValidateOpenArguments(const AtomicString& method,
   return true;
 }
 
+String SerializeHeaderMap(const HTTPHeaderMap& headers) {
+  StringBuilder string_builder;
+  for (auto it = headers.begin(); it != headers.end(); ++it) {
+    string_builder.Append(it->key);
+    string_builder.Append(": ");
+    string_builder.Append(it->value);
+    string_builder.Append("\r\n");
+  }
+  return string_builder.ToString();
+}
+
 }  // namespace
 
 class XMLHttpRequest::BlobLoader final
@@ -312,7 +323,11 @@ String XMLHttpRequest::responseText(ExceptionState& exception_state) {
   if (error_ || (state_ != kLoading && state_ != kDone))
     return String();
   String result = response_text_.ToString();
-  MarkTaintSource(result, "XMLHttpRequest.response");
+  Vector<String> args;
+  args.push_back(url_.GetString());
+  args.push_back(SerializeHeaderMap(request_headers_));
+  args.push_back(getAllResponseHeaders());
+  MarkTaintSource(result, "XMLHttpRequest.response", args);
   MarkTaintOperation(result, "XMLHttpRequest.responseText");
   return result;
 }
@@ -1388,8 +1403,8 @@ void XMLHttpRequest::overrideMimeType(const AtomicString& mime_type,
 }
 
 // https://xhr.spec.whatwg.org/#the-setrequestheader()-method
-void XMLHttpRequest::setRequestHeader(const AtomicString& name,
-                                      const AtomicString& value,
+void XMLHttpRequest::setRequestHeader(const String& name,
+                                      const String& value,
                                       ExceptionState& exception_state) {
   // "1. If |state| is not "opened", throw an InvalidStateError exception.
   //  2. If the send() flag is set, throw an InvalidStateError exception."
@@ -1432,7 +1447,7 @@ void XMLHttpRequest::setRequestHeader(const AtomicString& name,
   }
 
   // "6. Combine |name|/|value| in author request headers."
-  SetRequestHeaderInternal(name, AtomicString(normalized_value));
+  SetRequestHeaderInternal(AtomicString(name), AtomicString(normalized_value));
 }
 
 void XMLHttpRequest::SetRequestHeaderInternal(const AtomicString& name,

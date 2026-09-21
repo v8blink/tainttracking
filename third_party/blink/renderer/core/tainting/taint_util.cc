@@ -7,6 +7,10 @@
 #include "taint/Taint.h"
 #include "third_party/blink/renderer/bindings/core/v8/capture_source_location.h"
 #include "third_party/blink/renderer/bindings/core/v8/v8_binding_for_core.h"
+#include "third_party/blink/renderer/bindings/core/v8/v8_script_runner.h"
+#include "v8/include/v8-function.h"
+#include "v8/include/v8-script.h"
+#include "third_party/blink/renderer/core/dom/element.h"
 #include "third_party/blink/renderer/core/dom/node.h"
 #include "third_party/blink/renderer/core/tainting/taint_config.h"
 #include "third_party/blink/renderer/core/tainting/taint_report.h"
@@ -113,16 +117,19 @@ void SetV8StringTaint(v8::Isolate* isolate,
 
 TaintLocation GetTaintLocation() {
   v8::Isolate* isolate = v8::Isolate::GetCurrent();
-  if (!isolate || !isolate->InContext()) {
+  if (!isolate) {
     return TaintLocation();
+  }
+  if (!isolate->InContext()) {
+    return v8::String::GetFallbackTaintLocation(isolate);
   }
   ExecutionContext* context = CurrentExecutionContext(isolate);
   if (!context) {
-    return TaintLocation();
+    return v8::String::GetFallbackTaintLocation(isolate);
   }
   SourceLocation* location = CaptureSourceLocation(context);
   if (!location || location->IsUnknown()) {
-    return TaintLocation();
+    return v8::String::GetFallbackTaintLocation(isolate);
   }
   TaintMd5 hash = {};
   return TaintLocation(ToU16(location->Url()), location->LineNumber(),
@@ -168,8 +175,14 @@ void MarkTaintSourceElement(String& str, const char* name, const Node* node) {
 
 void MarkTaintSourceAttribute(String& str,
                               const char* name,
-                              const Element*,
+                              const Element* element,
                               const String& attr) {
+  if (element && str.Impl() && str.length()) {
+    const TaintList& taint_list = element->GetSelectorTaintFlowList();
+    if (taint_list.hasTaint()) {
+      str.Impl()->Taint().overlay(0u, str.length(), *taint_list.begin());
+    }
+  }
   if (!TaintIsSourceActive(name) || !str.Impl() || !str.length()) {
     return;
   }
@@ -229,6 +242,15 @@ void MarkTaintSource(TaintFlow& flow, const char* name, const Node* node) {
   flow.extend(op);
 }
 
+void MarkTaintSource(TaintFlow& flow, const char* name, const String& arg) {
+  if (!TaintIsSourceActive(name)) {
+    return;
+  }
+  Vector<String> args;
+  args.push_back(arg);
+  flow.extend(BuildOperation(name, args));
+}
+
 void MarkTaintOperation(String& str, const char* name) {
   if (!str.IsTainted()) {
     return;
@@ -259,10 +281,11 @@ void ReportTaintSink(const String& str, const char* name) {
   if (!TaintIsSinkActive(name)) {
     return;
   }
+  str.Impl()->Taint().extend(GetTaintOperation(name));
   ReportTaintFlow(name, str, str.Impl()->Taint());
 }
 
-void ReportTaintSink(const String& str, const char* name, const String&) {
+void ReportTaintSink(const String& str, const char* name, const String& arg) {
   if (!str.IsTainted()) {
     return;
   }
@@ -272,10 +295,13 @@ void ReportTaintSink(const String& str, const char* name, const String&) {
   if (!TaintIsSinkActive(name)) {
     return;
   }
+  Vector<String> args;
+  args.push_back(arg);
+  str.Impl()->Taint().extend(BuildOperation(name, args));
   ReportTaintFlow(name, str, str.Impl()->Taint());
 }
 
-void ReportTaintSink(const String& str, const char* name, const Node*) {
+void ReportTaintSink(const String& str, const char* name, const Node* node) {
   if (!str.IsTainted()) {
     return;
   }
@@ -285,6 +311,9 @@ void ReportTaintSink(const String& str, const char* name, const Node*) {
   if (!TaintIsSinkActive(name)) {
     return;
   }
+  Vector<String> args;
+  args.push_back(DescribeElement(node));
+  str.Impl()->Taint().extend(BuildOperation(name, args));
   ReportTaintFlow(name, str, str.Impl()->Taint());
 }
 
@@ -308,6 +337,8 @@ void ReportTaintSink(ScriptState* script_state,
   if (!taint.hasTaint()) {
     return;
   }
+  taint.extend(GetTaintOperation(name));
+  SetV8StringTaint(script_state->GetIsolate(), value.As<v8::String>(), taint);
   ReportTaintFlow(
       name, ToCoreString(script_state->GetIsolate(), value.As<v8::String>()),
       taint);
@@ -335,19 +366,60 @@ void DispatchTaintReportEvent(const char* sink_name,
   reported.extend(GetTaintOperation(sink_name));
   v8::Local<v8::String> v8_str = V8String(isolate, value);
   v8_str->SetTaint(isolate, reported);
-  v8::Local<v8::Object> detail = v8::Object::New(isolate);
-  detail
-      ->Set(v8_context, v8::String::NewFromUtf8Literal(isolate, "str"), v8_str)
-      .Check();
-  detail
-      ->Set(v8_context, v8::String::NewFromUtf8Literal(isolate, "sink"),
-            v8::String::NewFromUtf8(isolate, sink_name).ToLocalChecked())
-      .Check();
-  CustomEvent* event = CustomEvent::Create();
-  event->initCustomEvent(script_state, AtomicString("__taintreport"), true,
-                         false, ScriptValue(isolate, detail));
   v8::TryCatch try_catch(isolate);
-  window->DispatchEvent(*event);
+  static const char kReportBody[] =
+      "if (typeof window !== 'undefined' && typeof document !== 'undefined') {\n"
+      "    var t = window;\n"
+      "    if (location.protocol == 'javascript:' || location.protocol == 'data:' || location.protocol == 'about:') {\n"
+      "        t = parent.window;\n"
+      "    }\n"
+      "    var pl;\n"
+      "    try {\n"
+      "        pl = parent.location.href;\n"
+      "    } catch (e) {\n"
+      "        pl = 'different origin';\n"
+      "    }\n"
+      "    var timestamp = -1;\n"
+      "    try {\n"
+      "        timestamp = Date.now();\n"
+      "    } catch (e) {\n"
+      "        timestamp = -2;\n"
+      "    }\n"
+      "    var e = document.createEvent('CustomEvent');\n"
+      "    var info = {\n"
+      "        subframe: t !== window,\n"
+      "        loc: location.href,\n"
+      "        parentloc: pl,\n"
+      "        referrer: document.referrer,\n"
+      "        str: str,\n"
+      "        sink: sink,\n"
+      "        stack: stack,\n"
+      "        timestamp: timestamp\n"
+      "    }\n"
+      "    e.initCustomEvent('__taintreport', true, false, info);\n"
+      "    t.dispatchEvent(e);\n"
+      "    return info;\n"
+      "} else {\n"
+      "    return undefined;\n"
+      "}\n";
+  v8::ScriptOrigin origin(V8String(isolate, "taint_reporting.js"));
+  v8::ScriptCompiler::Source source(V8String(isolate, kReportBody), origin);
+  v8::Local<v8::String> arg_names[3] = {V8String(isolate, "str"),
+                                        V8String(isolate, "sink"),
+                                        V8String(isolate, "stack")};
+  v8::Local<v8::Function> report;
+  if (!v8::ScriptCompiler::CompileFunction(v8_context, &source, 3, arg_names)
+           .ToLocal(&report)) {
+    return;
+  }
+  v8::Local<v8::Value> argv[3] = {v8_str, V8String(isolate, sink_name),
+                                  v8::Undefined(isolate)};
+  v8::Local<v8::Value> result;
+  if (!V8ScriptRunner::CallFunction(report, context, v8::Undefined(isolate), 3,
+                                    argv, isolate)
+           .ToLocal(&result)) {
+    return;
+  }
 }
 
 }  // namespace blink

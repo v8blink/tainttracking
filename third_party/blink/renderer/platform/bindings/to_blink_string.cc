@@ -77,8 +77,7 @@ String StringTraits<String>::FromV8String(v8::Isolate* isolate,
   String result = String::CreateUninitialized(length, buffer);
   V8StringTrait::Write(isolate, v8_string, buffer);
   StringTaint v8_taint;
-  if (v8_string->GetTaint(isolate, &v8_taint) && v8_taint.hasTaint() &&
-      result.Impl()) {
+  if (v8_string->GetTaint(isolate, &v8_taint) && result.Impl()) {
     result.Impl()->SetTaint(v8_taint);
   }
   return result;
@@ -98,8 +97,7 @@ AtomicString StringTraits<AtomicString>::FromV8String(
     V8StringTrait::Write(isolate, v8_string, buffer_span.first(length));
     AtomicString result(buffer_span.first(length));
     StringTaint v8_taint;
-    if (v8_string->GetTaint(isolate, &v8_taint) && v8_taint.hasTaint() &&
-        result.Impl()) {
+    if (v8_string->GetTaint(isolate, &v8_taint) && result.Impl()) {
       result.Impl()->SetTaint(v8_taint);
     }
     return result;
@@ -109,8 +107,7 @@ AtomicString StringTraits<AtomicString>::FromV8String(
   V8StringTrait::Write(isolate, v8_string, buffer);
   AtomicString result(string);
   StringTaint v8_taint;
-  if (v8_string->GetTaint(isolate, &v8_taint) && v8_taint.hasTaint() &&
-      result.Impl()) {
+  if (v8_string->GetTaint(isolate, &v8_taint) && result.Impl()) {
     result.Impl()->SetTaint(v8_taint);
   }
   return result;

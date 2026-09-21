@@ -1367,13 +1367,26 @@ class HTMLFastPathParser {
     // the null atom is used to represent absence of attributes; attributes with
     // no values have the value set to an empty atom instead.
     AtomicString value;
+    SafeStringTaint value_taint;
     if (value_span.second.empty()) {
       value = AtomicString(value_span.first);
+      if (source_taint_.hasTaint() && !value_span.first.empty()) {
+        size_t value_offset =
+            static_cast<size_t>(value_span.first.data() - source_.data());
+        value_taint = source_taint_.safeSubTaint(
+            static_cast<uint32_t>(value_offset),
+            static_cast<uint32_t>(value_offset + value_span.first.size()));
+      }
     } else {
       value = AtomicString(value_span.second);
+      if (uchar_buffer_.Taint().hasTaint()) {
+        value_taint = uchar_buffer_.Taint();
+      }
     }
     if (value.IsNull()) {
       value = g_empty_atom;
+    } else if (value_taint.hasTaint() && value.Impl()) {
+      value.Impl()->SetTaint(value_taint);
     }
     return Attribute(std::move(name), std::move(value));
   }

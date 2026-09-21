@@ -951,7 +951,8 @@ class CORE_EXPORT Document : public ContainerNode,
 
   void write(const String& text,
              LocalDOMWindow* entered_window = nullptr,
-             ExceptionState& = ASSERT_NO_EXCEPTION);
+             ExceptionState& = ASSERT_NO_EXCEPTION,
+             bool newline_terminate = false);
   void writeln(const String& text,
                LocalDOMWindow* entered_window = nullptr,
                ExceptionState& = ASSERT_NO_EXCEPTION);

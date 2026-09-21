@@ -565,6 +565,14 @@ String Response::ContentType() const {
   return result;
 }
 
+String Response::GetInitialURL() const {
+  const Vector<KURL>& url_list = response_->InternalURLList();
+  if (url_list.empty()) {
+    return g_empty_string;
+  }
+  return url_list[0].GetString();
+}
+
 String Response::InternalMIMEType() const {
   return response_->InternalMIMEType();
 }

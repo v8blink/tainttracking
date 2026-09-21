@@ -63,6 +63,7 @@ class CORE_EXPORT Body : public ExecutionContextClient {
   // remove |ContentType()|.
   virtual String ContentType() const = 0;
   virtual String MimeType() const = 0;
+  virtual String GetInitialURL() const = 0;
 
   // Body consumption algorithms will reject with a TypeError in a number of
   // error conditions. This method wraps those up into one call which throws

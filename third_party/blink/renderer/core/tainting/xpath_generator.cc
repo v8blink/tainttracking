@@ -39,7 +39,7 @@ String GetNameAttribute(const Node* node) {
   if (!element) {
     return String();
   }
-  return element->getAttribute(html_names::kNameAttr).GetString();
+  return element->GetNameNoTainting().GetString();
 }
 
 String GenerateConcatExpression(const String& str) {
@@ -140,7 +140,7 @@ String GenerateXPath(const Node* node) {
   }
 
   if (element && element->HasID()) {
-    String elem_id = element->GetIdAttribute().GetString();
+    String elem_id = element->GetIdNoTainting().GetString();
     StringBuilder result;
     result.Append("//");
     result.Append(tag.ToString());

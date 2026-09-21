@@ -67,7 +67,8 @@ bool ClassCollection::ElementMatches(const Element& test_element) const {
     return false;
   }
   const_cast<Element&>(test_element)
-      .TaintSelectorOperation("document.getElementsByClassName");
+      .TaintSelectorOperation("document.getElementsByClassName",
+                              class_names_->value.SerializeToString());
   return true;
 }
 

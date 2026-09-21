@@ -176,6 +176,8 @@ String Location::hash() const {
 void Location::setHref(v8::Isolate* isolate,
                        const String& url_string,
                        ExceptionState& exception_state) {
+  ReportTaintSink(url_string, "location.href");
+
   LocalDOMWindow* incumbent_window = IncumbentDOMWindow(isolate);
   LocalDOMWindow* entered_window = EnteredDOMWindow(isolate);
   SetLocation(url_string, incumbent_window, entered_window, &exception_state);
@@ -185,6 +187,9 @@ void Location::setProtocol(v8::Isolate* isolate,
                            const String& protocol,
                            ExceptionState& exception_state) {
   KURL url = GetDocument()->Url();
+
+  ReportTaintSink(protocol, "location.protocol");
+
   if (!url.SetProtocol(protocol)) {
     exception_state.ThrowDOMException(
         DOMExceptionCode::kSyntaxError,
@@ -201,6 +206,9 @@ void Location::setHost(v8::Isolate* isolate,
                        ExceptionState& exception_state) {
   KURL url = GetDocument()->Url();
   url.SetHostAndPort(host);
+
+  ReportTaintSink(host, "location.host");
+
   SetLocation(url.GetString(), IncumbentDOMWindow(isolate),
               EnteredDOMWindow(isolate), &exception_state);
 }
@@ -219,6 +227,9 @@ void Location::setPort(v8::Isolate* isolate,
                        ExceptionState& exception_state) {
   KURL url = GetDocument()->Url();
   url.SetPort(port);
+
+  ReportTaintSink(port, "location.port");
+
   SetLocation(url.GetString(), IncumbentDOMWindow(isolate),
               EnteredDOMWindow(isolate), &exception_state);
 }
@@ -228,6 +239,9 @@ void Location::setPathname(v8::Isolate* isolate,
                            ExceptionState& exception_state) {
   KURL url = GetDocument()->Url();
   url.SetPath(pathname);
+
+  ReportTaintSink(pathname, "location.pathname");
+
   SetLocation(url.GetString(), IncumbentDOMWindow(isolate),
               EnteredDOMWindow(isolate), &exception_state);
 }
@@ -237,6 +251,9 @@ void Location::setSearch(v8::Isolate* isolate,
                          ExceptionState& exception_state) {
   KURL url = GetDocument()->Url();
   url.SetQuery(search);
+
+  ReportTaintSink(search, "location.search");
+
   SetLocation(url.GetString(), IncumbentDOMWindow(isolate),
               EnteredDOMWindow(isolate), &exception_state);
 }
@@ -257,6 +274,9 @@ void Location::setHash(v8::Isolate* isolate,
                            url.FragmentIdentifier().ToString())) {
     return;
   }
+
+  ReportTaintSink(hash, "location.hash");
+
   SetLocation(url.GetString(), IncumbentDOMWindow(isolate),
               EnteredDOMWindow(isolate), &exception_state);
 }
@@ -264,6 +284,8 @@ void Location::setHash(v8::Isolate* isolate,
 void Location::assign(v8::Isolate* isolate,
                       const String& url_string,
                       ExceptionState& exception_state) {
+  ReportTaintSink(url_string, "location.assign");
+
   LocalDOMWindow* incumbent_window = IncumbentDOMWindow(isolate);
   LocalDOMWindow* entered_window = EnteredDOMWindow(isolate);
   SetLocation(url_string, incumbent_window, entered_window, &exception_state);
@@ -272,6 +294,8 @@ void Location::assign(v8::Isolate* isolate,
 void Location::replace(v8::Isolate* isolate,
                        const String& url_string,
                        ExceptionState& exception_state) {
+  ReportTaintSink(url_string, "location.replace");
+
   LocalDOMWindow* incumbent_window = IncumbentDOMWindow(isolate);
   LocalDOMWindow* entered_window = EnteredDOMWindow(isolate);
   SetLocation(url_string, incumbent_window, entered_window, &exception_state,
@@ -297,8 +321,6 @@ void Location::SetLocation(const String& url,
                            SetLocationPolicy set_location_policy) {
   if (!IsAttached())
     return;
-
-  ReportTaintSink(url, "location.href");
 
   if (!incumbent_window->GetFrame())
     return;

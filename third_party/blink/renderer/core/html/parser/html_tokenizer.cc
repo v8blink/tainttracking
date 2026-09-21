@@ -406,7 +406,7 @@ bool HTMLTokenizer::NextTokenImpl(SegmentedString& source) {
 
     HTML_BEGIN_STATE(kTagNameState) {
       while (!CheckScanFlag(cc, ScanFlags::kTagNameSpecial)) {
-        token_.AppendToName(ToLowerCaseIfAlpha(cc), input_stream_preprocessor_.CurrentTaint());
+        token_.AppendToName(ToLowerCaseIfAlpha(cc));
         if (!input_stream_preprocessor_.AdvancePastNonNewline(source, cc))
           return HaveBufferedCharacterToken();
       }
@@ -845,7 +845,7 @@ bool HTMLTokenizer::NextTokenImpl(SegmentedString& source) {
       } else if (cc == '"' || cc == '\'' || cc == '<' || cc == '=') {
         ParseError();
       }
-      token_.AddNewAttribute(ToLowerCaseIfAlpha(cc), input_stream_preprocessor_.CurrentTaint());
+      token_.AddNewAttribute(ToLowerCaseIfAlpha(cc));
       if (options_.track_attributes_ranges) {
         attributes_ranges_.AddAttribute(source.NumberOfCharactersConsumed());
       }
@@ -855,7 +855,7 @@ bool HTMLTokenizer::NextTokenImpl(SegmentedString& source) {
 
     HTML_BEGIN_STATE(kAttributeNameState) {
       while (!CheckScanFlag(cc, ScanFlags::kAttributeNameSpecial)) {
-        token_.AppendToAttributeName(ToLowerCaseIfAlpha(cc), input_stream_preprocessor_.CurrentTaint());
+        token_.AppendToAttributeName(ToLowerCaseIfAlpha(cc));
         if (!input_stream_preprocessor_.AdvancePastNonNewline(source, cc))
           return HaveBufferedCharacterToken();
       }
@@ -893,7 +893,7 @@ bool HTMLTokenizer::NextTokenImpl(SegmentedString& source) {
       } else {
         DCHECK(cc == '"' || cc == '\'' || cc == '<' || cc == '=');
         ParseError();
-        token_.AppendToAttributeName(ToLowerCaseIfAlpha(cc), input_stream_preprocessor_.CurrentTaint());
+        token_.AppendToAttributeName(ToLowerCaseIfAlpha(cc));
         HTML_CONSUME_NON_NEWLINE(kAttributeNameState);
       }
     }
@@ -914,7 +914,7 @@ bool HTMLTokenizer::NextTokenImpl(SegmentedString& source) {
       } else if (cc == '"' || cc == '\'' || cc == '<') {
         ParseError();
       }
-      token_.AddNewAttribute(ToLowerCaseIfAlpha(cc), input_stream_preprocessor_.CurrentTaint());
+      token_.AddNewAttribute(ToLowerCaseIfAlpha(cc));
       if (options_.track_attributes_ranges) {
         attributes_ranges_.AddAttribute(source.NumberOfCharactersConsumed());
       }
@@ -1417,7 +1417,7 @@ bool HTMLTokenizer::NextTokenImpl(SegmentedString& source) {
         token_.SetForceQuirks();
         return EmitAndReconsumeInDataState();
       } else {
-        token_.AppendToName(ToLowerCaseIfAlpha(cc), input_stream_preprocessor_.CurrentTaint());
+        token_.AppendToName(ToLowerCaseIfAlpha(cc));
         HTML_CONSUME_NON_NEWLINE(kDOCTYPENameState);
       }
     }

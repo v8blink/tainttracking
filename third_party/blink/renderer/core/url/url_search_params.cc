@@ -6,6 +6,8 @@
 #include "third_party/blink/renderer/core/tainting/taint_util.h"
 
 #include <algorithm>
+#include <string>
+#include <string_view>
 #include <utility>
 
 #include "third_party/blink/public/mojom/use_counter/metrics/web_feature.mojom-shared.h"
@@ -16,6 +18,7 @@
 #include "third_party/blink/renderer/platform/network/form_data_encoder.h"
 #include "third_party/blink/renderer/platform/runtime_enabled_features.h"
 #include "third_party/blink/renderer/platform/weborigin/kurl.h"
+#include "third_party/blink/renderer/platform/wtf/text/ascii_ctype.h"
 #include "third_party/blink/renderer/platform/wtf/text/text_encoding.h"
 
 namespace blink {
@@ -51,6 +54,52 @@ class URLSearchParamsIterationSource final
 bool CompareParams(const std::pair<String, String>& a,
                    const std::pair<String, String>& b) {
   return CodeUnitCompareLessThan(a.first, b.first);
+}
+
+wtf_size_t EncodedFormDataLength(unsigned char c) {
+  static constexpr std::string_view kSafeCharacters = "-._*";
+  if (IsAsciiAlphanumeric(c) ||
+      (c != '\0' && kSafeCharacters.find(c) != std::string_view::npos)) {
+    return 1;
+  }
+  if (c == ' ')
+    return 1;
+  return 3;
+}
+
+void AppendFormDataTaint(const String& input,
+                         StringTaint& taint,
+                         wtf_size_t& offset) {
+  std::string utf8 = input.Utf8();
+  const StringTaint& input_taint = input.Taint();
+  if (!input_taint.hasTaint()) {
+    for (char c : utf8)
+      offset += EncodedFormDataLength(static_cast<unsigned char>(c));
+    return;
+  }
+  wtf_size_t index = 0;
+  size_t i = 0;
+  while (i < utf8.length()) {
+    unsigned char lead = static_cast<unsigned char>(utf8[i]);
+    size_t sequence = 1;
+    wtf_size_t units = 1;
+    if (lead >= 0xF0) {
+      sequence = 4;
+      units = 2;
+    } else if (lead >= 0xE0) {
+      sequence = 3;
+    } else if (lead >= 0xC0) {
+      sequence = 2;
+    }
+    wtf_size_t begin = offset;
+    for (size_t k = 0; k < sequence && i + k < utf8.length(); ++k)
+      offset += EncodedFormDataLength(static_cast<unsigned char>(utf8[i + k]));
+    const TaintFlow* flow = input_taint.at(index);
+    if (flow)
+      taint.append(TaintRange(begin, offset, *flow));
+    i += sequence;
+    index += units;
+  }
 }
 
 }  // namespace
@@ -137,8 +186,27 @@ void URLSearchParams::RunUpdateSteps() {
 static String DecodeString(String input) {
   // |DecodeURLMode::kUTF8| is used because "UTF-8 decode without BOM" should
   // be performed (see https://url.spec.whatwg.org/#concept-urlencoded-parser).
-  return DecodeUrlEscapeSequences(input.Replace('+', ' '),
-                                  DecodeUrlMode::kUtf8);
+  String result = DecodeUrlEscapeSequences(input.Replace('+', ' '),
+                                           DecodeUrlMode::kUtf8);
+  const StringTaint& input_taint = input.Taint();
+  if (!input_taint.hasTaint() || result.empty())
+    return result;
+  SafeStringTaint taint;
+  wtf_size_t out = 0;
+  wtf_size_t length = input.length();
+  wtf_size_t result_length = result.length();
+  for (wtf_size_t i = 0; i < length && out < result_length; ++out) {
+    if (input[i] == '%' && i + 2 < length && IsAsciiHexDigit(input[i + 1]) &&
+        IsAsciiHexDigit(input[i + 2])) {
+      taint.concat(input_taint.safeSubTaint(i + 1), out);
+      i += 3;
+    } else {
+      taint.concat(input_taint.safeSubTaint(i), out);
+      i += 1;
+    }
+  }
+  result.SetTaint(taint);
+  return result;
 }
 
 void URLSearchParams::SetInputWithoutUpdate(const String& query_string) {
@@ -173,6 +241,17 @@ String URLSearchParams::toString() const {
   Vector<char> encoded_data;
   EncodeAsFormData(encoded_data);
   String result(encoded_data);
+  SafeStringTaint taint;
+  wtf_size_t offset = 0;
+  for (const auto& param : params_) {
+    if (offset != 0)
+      offset += 1;
+    AppendFormDataTaint(param.first, taint, offset);
+    offset += 1;
+    AppendFormDataTaint(param.second, taint, offset);
+  }
+  if (taint.hasTaint())
+    result.SetTaint(taint);
   MarkTaintOperation(result, "URL.parse");
   return result;
 }

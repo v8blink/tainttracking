@@ -38,7 +38,8 @@ bool TagCollection::ElementMatches(const Element& test_node) const {
                  qualified_name_ == test_node.TagQName().ToString();
   if (matches) {
     const_cast<Element&>(test_node)
-        .TaintSelectorOperation("document.getElementsByTagName");
+        .TaintSelectorOperation("document.getElementsByTagName",
+                                qualified_name_);
   }
   return matches;
 }
@@ -65,7 +66,8 @@ bool TagCollectionNS::ElementMatches(const Element& test_node) const {
                  namespace_uri_ == test_node.namespaceURI();
   if (matches) {
     const_cast<Element&>(test_node)
-        .TaintSelectorOperation("document.getElementsByTagName");
+        .TaintSelectorOperation("document.getElementsByTagNameNS",
+                                local_name_);
   }
   return matches;
 }

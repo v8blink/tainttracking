@@ -33,6 +33,7 @@
 #include "mojo/public/cpp/system/wait.h"
 #include "net/http/http_response_headers.h"
 #include "services/network/public/mojom/url_response_head.mojom.h"
+#include "taint/Taint.h"
 #include "third_party/blink/public/common/features.h"
 #include "third_party/blink/public/common/page/v8_compile_hints_histograms.h"
 #include "third_party/blink/public/mojom/script/script_type.mojom-blink-forward.h"
@@ -130,6 +131,12 @@ class SourceStream : public v8::ScriptCompiler::ExternalSourceStream,
   SourceStream& operator=(const SourceStream&) = delete;
 
   ~SourceStream() override = default;
+
+  const StringTaint* GetTaintPtr() const override {
+    return taint_.hasTaint() ? &taint_ : nullptr;
+  }
+
+  void SetTaint(const StringTaint& taint) { taint_ = taint; }
 
   // Called by V8 on a background thread. Should block until we can return
   // some data. Ownership of the |src| data buffer is passed to the caller,
@@ -420,6 +427,12 @@ class SourceStream : public v8::ScriptCompiler::ExternalSourceStream,
     // waiting).
     DCHECK(resource);
 
+    const AtomicString& taint_header =
+        resource->GetResponse().HttpHeaderField(AtomicString("X-Taint"));
+    if (!taint_header.empty()) {
+      taint_ = ParseStringTaintForE2E(taint_header.Utf8());
+    }
+
     const SharedBuffer* resource_buffer = resource->ResourceBuffer().get();
 
     CHECK(initial_data_.empty());
@@ -484,6 +497,8 @@ class SourceStream : public v8::ScriptCompiler::ExternalSourceStream,
   SegmentedBuffer TakeRawData() { return std::move(raw_data_); }
 
  private:
+  StringTaint taint_;
+
   v8::ScriptCompiler::FlexibleExternalSourceStream::Chunk
   DecodeAndReturnFlexibleBuffer(base::span<const uint8_t> raw_bytes) {
     CHECK(base::FeatureList::IsEnabled(features::kDecodeScriptsInBlink));
@@ -2159,6 +2174,12 @@ bool BackgroundJSStreamManager::TryStartStreamingTask(
   }
   auto source_stream = std::make_unique<SourceStream>();
   source_stream_ptr_ = source_stream.get();
+  if (head_ && head_->headers) {
+    if (std::optional<std::string> taint_header =
+            head_->headers->GetNormalizedHeader("X-Taint")) {
+      source_stream->SetTaint(ParseStringTaintForE2E(*taint_header));
+    }
+  }
   source_stream->TakeDataAndPipeOnBackgroundThread(
       std::move(body_), script_decoder.get(), std::move(stream_decoder));
   std::unique_ptr<v8::ScriptCompiler::StreamedSource> streamed_source;

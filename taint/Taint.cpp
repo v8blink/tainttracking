@@ -930,10 +930,155 @@ std::vector<TaintFlow>::const_iterator TaintList::end() const {
   return flows_->end();
 }
 
+static bool IsE2EAlnum(char c) {
+  return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') ||
+         (c >= 'A' && c <= 'Z');
+}
+
+static bool ParseE2ENumber(const std::string& s, uint32_t& out) {
+  if (s.empty()) {
+    return false;
+  }
+  uint32_t value = 0;
+  for (char c : s) {
+    if (c < '0' || c > '9') {
+      return false;
+    }
+    value = value * 10 + static_cast<uint32_t>(c - '0');
+  }
+  out = value;
+  return true;
+}
+
+static std::string ParseE2EQuotedString(const std::string& str, size_t& i,
+                                        bool& valid) {
+  char c = str[i];
+  size_t pos = str.find(c, i + 1);
+  if (pos == std::string::npos) {
+    valid = false;
+    return "";
+  }
+  valid = true;
+  std::string res = str.substr(i + 1, pos - i - 1);
+  i = pos + 1;
+  return res;
+}
+
+static std::pair<std::string, std::string> ParseE2EKeyValuePair(
+    const std::string& str, size_t& i, size_t length, bool& valid) {
+  std::string key, value;
+  bool expecting_value = false, parsing_value = false;
+  valid = true;
+  while (i < length) {
+    char c = str[i];
+    if (IsE2EAlnum(c)) {
+      if (expecting_value) {
+        parsing_value = true;
+      }
+      if (!parsing_value) {
+        key.push_back(c);
+      } else {
+        value.push_back(c);
+      }
+    } else if (c == ':') {
+      if (expecting_value) {
+        break;
+      }
+      expecting_value = true;
+    } else if (c == '\'' || c == '"') {
+      if (!expecting_value) {
+        break;
+      }
+      parsing_value = true;
+      value = ParseE2EQuotedString(str, i, valid);
+      break;
+    } else if (parsing_value) {
+      break;
+    }
+    i++;
+  }
+  if (!parsing_value) {
+    valid = false;
+  }
+  return std::make_pair(key, value);
+}
+
+static bool ParseE2ERange(const std::string& str, size_t& i, size_t length,
+                          StringTaint& taint, uint32_t& last_end) {
+  i++;
+  uint32_t begin = 0, end = 0;
+  std::string source;
+  bool have_begin = false, have_end = false, have_source = false;
+  bool valid = true;
+  while (i < length) {
+    if (IsE2EAlnum(str[i])) {
+      std::pair<std::string, std::string> kv =
+          ParseE2EKeyValuePair(str, i, length, valid);
+      if (!valid) {
+        break;
+      } else if (kv.first == "begin") {
+        have_begin = ParseE2ENumber(kv.second, begin);
+        if (!have_begin) {
+          valid = false;
+          break;
+        }
+      } else if (kv.first == "end") {
+        have_end = ParseE2ENumber(kv.second, end);
+        if (!have_end) {
+          valid = false;
+          break;
+        }
+      } else if (kv.first == "source") {
+        have_source = true;
+        source = kv.second;
+      }
+    } else if (str[i] == '}') {
+      i++;
+      break;
+    } else {
+      i++;
+    }
+  }
+  if (!valid || !have_begin || !have_end || !have_source) {
+    return false;
+  }
+  if (begin < last_end || end < begin) {
+    return false;
+  }
+  TaintOperation op(source.c_str());
+  op.setSource();
+  TaintRange range = TaintRange(begin, end, TaintFlow(op));
+  taint.append(range);
+  last_end = end;
+  return true;
+}
+
+static bool ParseStringTaintForE2ELegacy(const std::string& input,
+                                         StringTaint& taint) {
+  if (input.length() < 2 || input.front() != '[' || input.back() != ']') {
+    return false;
+  }
+  taint.clear();
+  size_t i = 1;
+  size_t end = input.length() - 1;
+  uint32_t last_end = 0;
+  while (i < end) {
+    if (input[i] == '{') {
+      if (!ParseE2ERange(input, i, end, taint, last_end)) {
+        taint.clear();
+        return false;
+      }
+    } else {
+      i++;
+    }
+  }
+  return true;
+}
+
 bool ParseStringTaintForE2E(const std::string& input, StringTaint& taint) {
   json data = json::parse(input, nullptr, false);
   if (data.is_discarded()) {
-    return false;
+    return ParseStringTaintForE2ELegacy(input, taint);
   }
 
   if (!data.is_array()) {

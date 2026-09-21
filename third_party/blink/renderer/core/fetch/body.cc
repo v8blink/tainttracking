@@ -32,6 +32,7 @@
 #include "third_party/blink/renderer/platform/network/parsed_content_type.h"
 #include "third_party/blink/renderer/platform/wtf/functional.h"
 #include "third_party/blink/renderer/platform/wtf/text/text_encoding.h"
+#include "v8/include/v8-primitive.h"
 
 namespace blink {
 
@@ -40,15 +41,23 @@ namespace {
 class BodyConsumerBase : public GarbageCollected<BodyConsumerBase>,
                          public FetchDataLoader::Client {
  public:
-  explicit BodyConsumerBase(ScriptPromiseResolverBase* resolver)
+  BodyConsumerBase(ScriptPromiseResolverBase* resolver,
+                   const String& initial_url)
       : resolver_(resolver),
         task_runner_(ExecutionContext::From(resolver_->GetScriptState())
-                         ->GetTaskRunner(TaskType::kNetworking)) {
+                         ->GetTaskRunner(TaskType::kNetworking)),
+        initial_url_(initial_url),
+        taint_location_(GetTaintLocation()) {
   }
   BodyConsumerBase(const BodyConsumerBase&) = delete;
   BodyConsumerBase& operator=(const BodyConsumerBase&) = delete;
 
   ScriptPromiseResolverBase* Resolver() { return resolver_.Get(); }
+  const String& InitialURL() const { return initial_url_; }
+  void ApplyFallbackTaintLocation() {
+    v8::String::SetFallbackTaintLocation(
+        resolver_->GetScriptState()->GetIsolate(), taint_location_);
+  }
   void DidFetchDataLoadFailed() override {
     ScriptState* state = resolver_->GetScriptState();
     if (state->ContextIsValid()) {
@@ -109,6 +118,8 @@ class BodyConsumerBase : public GarbageCollected<BodyConsumerBase>,
 
   const Member<ScriptPromiseResolverBase> resolver_;
   const scoped_refptr<base::SingleThreadTaskRunner> task_runner_;
+  const String initial_url_;
+  const TaintLocation taint_location_;
 };
 class BodyBlobConsumer final : public BodyConsumerBase {
  public:
@@ -172,7 +183,8 @@ class BodyTextConsumer final : public BodyConsumerBase {
 
   void DidFetchDataLoadedString(const String& string) override {
     String taint_target = string;
-    MarkTaintSource(taint_target, "fetch.text");
+    ApplyFallbackTaintLocation();
+    MarkTaintSource(taint_target, "fetch.text()", InitialURL());
     ResolveLater<ResolveType>(string);
   }
 };
@@ -184,7 +196,8 @@ class BodyJsonConsumer final : public BodyConsumerBase {
 
   void DidFetchDataLoadedString(const String& string) override {
     String taint_target = string;
-    MarkTaintSource(taint_target, "fetch.json");
+    ApplyFallbackTaintLocation();
+    MarkTaintSource(taint_target, "fetch.json()", InitialURL());
     if (!Resolver()->GetExecutionContext() ||
         Resolver()->GetExecutionContext()->IsContextDestroyed())
       return;
@@ -246,9 +259,10 @@ ScriptPromise<typename Consumer::ResolveType> Body::LoadAndConvertBody(
       script_state, exception_state.GetContext());
   auto promise = resolver->Promise();
   if (auto* body_buffer = BodyBuffer()) {
-    body_buffer->StartLoading(create_loader(),
-                              MakeGarbageCollected<Consumer>(resolver),
-                              exception_state);
+    body_buffer->StartLoading(
+        create_loader(),
+        MakeGarbageCollected<Consumer>(resolver, GetInitialURL()),
+        exception_state);
     if (exception_state.HadException()) {
       resolver->Detach();
       return EmptyPromise();

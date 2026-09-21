@@ -373,6 +373,9 @@ StringView KURL::LastPathComponent() const {
 
 String KURL::Protocol() const {
   DCHECK_EQ(ComponentString(parsed_.scheme), protocol_);
+  StringView scheme = ComponentStringView(parsed_.scheme);
+  if (scheme.isTainted())
+    return scheme.ToString();
   return protocol_;
 }
 
@@ -936,7 +939,19 @@ void KURL::Init(const KURL& base,
   } else {
     string_ = AtomicString(output_url_span);
     if (relative.isTainted() && string_.Impl()) {
-      string_.Impl()->SetTaint(relative.Taint());
+      const unsigned output_length =
+          static_cast<unsigned>(output_url_span.size());
+      const unsigned relative_length = relative.length();
+      unsigned taint_offset = 0;
+      if (output_length >= relative_length &&
+          StringView(StringView(output_url_span),
+                     output_length - relative_length,
+                     relative_length) == relative) {
+        taint_offset = output_length - relative_length;
+      }
+      SafeStringTaint taint;
+      taint.concat(relative.Taint(), taint_offset);
+      string_.Impl()->SetTaint(taint);
     }
   }
 

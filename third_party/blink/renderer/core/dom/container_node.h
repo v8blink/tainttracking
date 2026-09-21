@@ -41,6 +41,10 @@
 
 namespace blink {
 
+namespace bindings {
+class NativeValueTraitsStringAdapter;
+}
+
 class Element;
 class ExceptionState;
 class FragmentParserConfig;
@@ -107,6 +111,12 @@ class CORE_EXPORT ContainerNode : public Node {
   Element* querySelector(const AtomicString& selectors, ExceptionState&);
   StaticElementList* querySelectorAll(const AtomicString& selectors,
                                       ExceptionState&);
+  Element* querySelector(
+      const bindings::NativeValueTraitsStringAdapter& selectors,
+      ExceptionState&);
+  StaticElementList* querySelectorAll(
+      const bindings::NativeValueTraitsStringAdapter& selectors,
+      ExceptionState&);
 
   Node* firstChild() const { return first_child_.Get(); }
   Node* lastChild() const {
@@ -154,6 +164,8 @@ class CORE_EXPORT ContainerNode : public Node {
                                   ExceptionState&) const;
 
   Element* getElementById(const AtomicString& id) const;
+  Element* getElementById(
+      const bindings::NativeValueTraitsStringAdapter& id) const;
   HTMLCollection* getElementsByTagName(const AtomicString&);
   HTMLCollection* getElementsByTagNameNS(const AtomicString& namespace_uri,
                                          const AtomicString& local_name);

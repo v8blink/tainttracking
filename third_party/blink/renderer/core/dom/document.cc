@@ -4755,7 +4755,8 @@ bool Document::ShouldScheduleLayout() const {
 
 void Document::write(const String& text,
                      LocalDOMWindow* entered_window,
-                     ExceptionState& exception_state) {
+                     ExceptionState& exception_state,
+                     bool newline_terminate) {
   TRACE_EVENT1("blink", "Document::write", "size_in_bytes",
                text.CharactersSizeInBytes());
 
@@ -4772,7 +4773,8 @@ void Document::write(const String& text,
     return;
   }
 
-  ReportTaintSink(text, "document.write");
+  ReportTaintSink(text,
+                  newline_terminate ? "document.writeln" : "document.write");
 
   if (entered_window && !entered_window->GetFrame())
     return;
@@ -4836,8 +4838,7 @@ void Document::write(const String& text,
 void Document::writeln(const String& text,
                        LocalDOMWindow* entered_window,
                        ExceptionState& exception_state) {
-  ReportTaintSink(text, "document.writeln");
-  write(text, entered_window, exception_state);
+  write(text, entered_window, exception_state, true);
   if (exception_state.HadException())
     return;
   write("\n", entered_window);
